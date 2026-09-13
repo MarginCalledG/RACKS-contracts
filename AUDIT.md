@@ -1003,6 +1003,55 @@ Eigenschaft zu behaupten, die der Code nicht hat.
 den Guard. `meltPool()` ist absichtlich **nicht** guarded (externer Self-Call aus `_preOp`), taugt
 also nicht als Probe. Wer hier weiterprueft, muss einen geschuetzten Einstiegspunkt nehmen.
 
+## Runde 40 — DynamicTax und TwapOracle
+12 Eigenschaften fuer die Preisbildung selbst, nicht nur fuer ihre Deckelung. Kein Sicherheitsbefund,
+aber drei Eigenschaften, die im Launch-Text stehen muessen, weil sie von dem abweichen, was der Code
+ueber sich selbst behauptet.
+
+Die Kurve (reine Bibliothek, deshalb gefuzzt):
+- Ueber den gesamten Eingaberaum bleibt die Rate in [100, 800]. Das ist die Eigenschaft, auf die
+  sich der Token verlaesst, wenn er das Orakel deckelt.
+- Monoton in der Dislokation: ein schlechterer Preis ist nie billiger zu verkaufen.
+- Monoton im Trade-Impact auf der eigenen Seite: ein groesserer Trade zahlt nie weniger.
+- Unter Kaufdruck haelt die Verkaufsrate bei 400, wie weit der Preis auch laeuft.
+- `twap == 0` revertet (`"twap"`), der Token faengt es und faellt auf die Basisrate.
+- Slicing: die Impact-Komponente ist per Trade, also ist eine Scheibe billiger als das Ganze — so
+  gewollt. Was traegt, ist der State-Term: sobald die Scheiben den Preis 10 % bewegt haben, steht die
+  Verkaufsrate bei 800, unabhaengig von der Scheibengroesse.
+
+**Beobachtung 1: `WINDOW = 15 minutes` wird nirgends gelesen.** Der Contract heisst sich selbst
+15-Minuten-TWAP, aber nichts referenziert die Konstante. Die tatsaechliche Mittelungsspanne ist
+"zurueck bis zur aeltesten von 8 Ringproben, die mindestens `PERIOD` auseinanderliegen", also
+**mindestens 7 x 3 = 21 Minuten** bei aktivem Markt. Gemessen: ein Preissprung ist nach 1.260
+Sekunden vollstaendig aufgenommen. Wer 15 Minuten in den Launch-Text schreibt, schreibt eine Zahl
+hin, die der Code nicht benutzt.
+
+**Beobachtung 2: Leerlauf altert den Durchschnitt nicht, er friert ihn ein.** `twap()`
+extrapoliert `lastSpot` — den beim letzten `update()` erfassten Preis — ueber die gesamte Luecke.
+Nach sieben Tagen Stille meldet das Orakel weiterhin den Preis von vor der Stille, egal wie weit der
+Pool gelaufen ist. `update()` ist permissionless, also kann jeder es auffrischen; nur zwingt niemanden
+etwas dazu. Der Keeper-Tick tut es heute nicht.
+
+**Beobachtung 3: das Orakel wird nur von BESTEUERTEN Trades vorgerueckt.** `_taxBps` kehrt vor dem
+`update()`-Aufruf zurueck, sowohl fuer tax-exempte Parteien als auch fuer die **gesamte
+Launch-Stunde**. Wenn die Launch-Stunde endet und die Rate von 8 % auf die Basis faellt, ist der Ring
+also noch leer und `twap() == spot` — der Dislokations-Term ist blind, bis die ersten Proben landen.
+In dieser Luecke traegt allein der Impact-Term: ein Trade mit 5 % Impact erreicht weiterhin 800, eine
+Folge kleiner Trades zahlt bis zur ersten Probe nur die Basis. Empfehlung fuer den Betrieb: den
+Keeper `oracle.update()` mit ticken lassen, dann ist der Ring vor dem Ende der Launch-Stunde warm.
+Kein Code geaendert — das ist eine Betriebs-, keine Contract-Entscheidung.
+
+Weiter geprueft und gehalten:
+- Zweihundert `update()` im selben Block bewegen den TWAP um null; zwei Minuten Spam im
+  Sekundentakt koennen einen 10x-Spike nicht zum Durchschnitt machen. Die Ringabstaende lassen sich
+  nicht unter `PERIOD` druecken.
+- Der TWAP liegt stets zwischen dem niedrigsten und hoechsten in seiner Spanne beobachteten Spot.
+- Ein leergezogener Pool friert den Spot ein, statt durch null zu teilen; `update()` revertet nicht.
+
+**Zur Vertrauensliste (Abschnitt 9):** `TwapOracle.setPair` ist eine Owner-Vollmacht, die dort nicht
+aufgefuehrt ist. Das Deploy-Skript uebergibt die Orakel-Ownership an die Multisig (Zeile 114), der
+Punkt gehoert also in dieselbe Liste wie `setTaxOracle`.
+
 ## Nicht gefunden (geprueft)
 - Flash-Loan-Manipulation des TWAP: Spot -75% in einem Block bewegt TWAP 0 bps (Stresstest).
 - Cayman-Inflation: Index-basiert, keine Share-Ratio -> kein First-Depositor-Vektor.
