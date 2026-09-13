@@ -929,6 +929,43 @@ Zusage brechen als die, die hier verletzt wird. Stattdessen ist die Schranke als
 ich selbst formuliert habe — und der Auditor der Runde 36 hat recht damit, dass ein Szenario, das
 niemand beschreibt, auch hier nicht auftaucht.
 
+## Runde 38 — HashChainSeed adversarisch (N-44)
+11 Eigenschaften fuer die Zufallsquelle, den Teil, den der Projektkontext als den empfindlichsten
+fuehrt. Ein Befund.
+
+**N-44 — der Constructor bindet den Agenten, ohne seine Uhr zu cachen.**
+`setAgent` speichert `agentStart` und `agentEpochLen`, weil `unrevealable()` bis zu REVEAL_SCAN mal
+pro Agenten-Lookup gelesen wird (N-11: sonst 175k statt 14k Gas). Der Constructor nimmt ebenfalls
+eine Agenten-Adresse entgegen, weist `agent` zu — und cacht **nicht**. Danach verweigert `setAgent`
+den Dienst (`"agent is final"`), also bleiben beide Werte dauerhaft 0.
+Folge: `_epochEnd(e) = 0 + (e+1)*0 = 0`, also ist `block.timestamp >= _epochEnd(e)` immer wahr und
+`unrevealable(e)` meldet **jede** noch nicht aufgedeckte Epoche als tot — die laufende und sogar
+zukuenftige. `failed()` leitet daraus ab, `_firstLive` im Agenten ueberspringt entsprechend alles,
+und kein Agent wird je enthuellt. Die Quelle ist ab Deployment unbrauchbar, ohne dass irgendetwas
+revertet.
+Reichweite: `script/Deploy.s.sol` uebergibt `address(0)` und ruft danach `setAgent` — der
+ausgelieferte Pfad ist also gesund. Der Befund trifft jede abweichende Deploy-Reihenfolge, ein
+Testnetz-Skript oder eine spaetere Neuverdrahtung. Kein Angriff, sondern eine still scheiternde
+Initialisierung — Muster 1 der Projektliste: dieselbe Regel (Agent binden heisst Uhr cachen) an zwei
+Stellen implementiert, an einer unvollstaendig.
+Fix: beide Pfade laufen durch `_bindAgent(address)`. Eine Stelle, an der Zeiger und Uhr geschrieben
+werden.
+Test: `testSeed_ConstructorWithAgentMustNotBrickTheClock` — prueft zuerst die Auswirkung (eine
+lebende Epoche darf sich nicht als tot lesen), dann die Ursache.
+
+Geprueft und gehalten:
+- **Reveal-Fenster** — nicht vor Epochenbeginn, nie nach Epochenende (der Keeper darf die
+  Post-Close-Entropie nie zuerst sehen); nur Urbilder der committeten Kette werden angenommen.
+- **Close-Erfassung** — der erste Toucher fixiert eine Blocknummer in der Zukunft, deren Hash noch
+  nicht existiert; ein zweiter Toucher kann sie nicht mehr verschieben (kein Re-Roll, R7-2).
+- **Seed-Unkenntnis** — ein aufgedecktes Urbild allein ergibt `seed == 0`; auch nach Schritt eins
+  noch; erst nach dem Einfrieren des Close-Hashes existiert der Seed.
+- **Kaution** — ein Slash nimmt nie mehr als vorhanden und derselbe Epochen-Slash ist nicht
+  wiederholbar; `withdrawBond` laesst sich exakt bis zur Deckungslinie fuehren, ein wei darueber
+  nicht; ein Keeper-Wechsel verfaellt die Kaution in den Pot und der Nachfolger startet ungedeckt.
+- **Melt** — die exempte Quelle haelt ihren Nominalwert ueber 120 Tage; faellt der `setExempt`-Schritt
+  im Deploy weg, laeuft die Zaehlung der Balance davon und `syncBond()` repariert genau das.
+
 ## Nicht gefunden (geprueft)
 - Flash-Loan-Manipulation des TWAP: Spot -75% in einem Block bewegt TWAP 0 bps (Stresstest).
 - Cayman-Inflation: Index-basiert, keine Share-Ratio -> kein First-Depositor-Vektor.

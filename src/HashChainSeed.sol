@@ -72,8 +72,21 @@ contract HashChainSeed is ReentrancyGuard {
     modifier onlyKeeper() { require(msg.sender == keeper, "!keeper"); _; }
 
     constructor(address _racks, address _vault, address _agent, uint256 _slashPerMiss) {
-        racks = IRacksS(_racks); vault = IVaultS(_vault); agent = IAgentS(_agent);
+        racks = IRacksS(_racks); vault = IVaultS(_vault);
         owner = msg.sender; slashPerMiss = _slashPerMiss;
+        // N-44: bind through the SAME path setAgent uses. The constructor used to assign `agent`
+        // without caching the clock, and setAgent then refused to run ("agent is final") — so a
+        // source built with a non-zero agent kept agentStart = agentEpochLen = 0 forever, making
+        // _epochEnd(e) zero and every unrevealed epoch, including live and future ones, read as
+        // already dead. One rule, two initialisation paths, one of them silently skipping it.
+        if (_agent != address(0)) _bindAgent(_agent);
+    }
+
+    /// the one place the agent pointer and its cached clock are written
+    function _bindAgent(address a) private {
+        agent = IAgentS(a);
+        agentStart = IAgentS(a).startTime();
+        agentEpochLen = IAgentS(a).EPOCH();
     }
 
     // ---- owner ----
@@ -92,8 +105,7 @@ contract HashChainSeed is ReentrancyGuard {
     function setAgent(address a) external onlyOwner {
         require(address(agent) == address(0), "agent is final");
         require(a != address(0), "zero");
-        agent = IAgentS(a);
-        agentStart = IAgentS(a).startTime(); agentEpochLen = IAgentS(a).EPOCH();
+        _bindAgent(a);
     }
     function _epochEnd(uint32 e) internal view returns (uint256) { return agentStart + (uint256(e) + 1) * agentEpochLen; }
     function setSlash(uint256 s) external onlyOwner { slashPerMiss = s; emit SlashSet(s); }
