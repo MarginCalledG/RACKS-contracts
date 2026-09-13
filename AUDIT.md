@@ -829,6 +829,62 @@ Daraus folgt alles andere:
 Kommentar ("purely an optimisation") ist korrigiert: der Aufruf entscheidet nicht, WELCHEN Tier ein
 Agent bekommt, aber sehr wohl, wann seine Uhr startet.
 
+## Runde 36 — die Wiederbelebung als eigene Operation (N-41, N-42, N-43)
+Runde 35 machte den Tod reparierbar. Dabei entstand eine neue Operation — die Wiederbelebung — die
+einen Wallet-Slot und einen Platz unter `CAP` neu belegt. Sie wurde aber wie ein Buchhaltungsdetail
+im Inneren von `cacheTier` abgelegt, statt wie das behandelt zu werden, was sie ist: ein zweiter
+Weg, lebendig zu werden. Ein Mint prueft zwei Grenzen; dieser zweite Weg prueft keine.
+
+**N-42 — Wiederbelebung umgeht `MAX_PER_WALLET` und `CAP`.**
+Ablauf: zehn Agenten im Ausfall minten, elf Tage warten bis der Sweep sie einsammelt (`ownedLiving`
+faellt auf 0), zehn neue minten, dann Cursor vorschieben — die ersten zehn kommen zurueck.
+`ownedLiving[alice] = 20` bei `MAX_PER_WALLET = 10`, alle zwanzig voll spielbar. Keine
+Buchhaltungsfrage: `MAX_PER_WALLET` ist die Anti-Sybil-Grenze in einem Pari-mutuel-Spiel, in dem der
+Anteil an der Ausschuettung an der Zahl der Agenten haengt. Wer den Ausfall abwartet, verdoppelt
+seine Position.
+Ursache: `livingCount++` und `ownedLiving++` im Wiederbelebungszweig ohne die Pruefungen, die
+`mint()` eine Zeile weiter oben durchfuehrt. Muster 2 der Projektliste — dieselbe Geldbedingung an
+zwei Stellen, nur an einer geprueft.
+Fix: der Zweig prueft beide Caps. Er **revertet nicht**, sondern kehrt zurueck und laesst `lastFed`
+unberuehrt — die Wiederbelebung bleibt damit geschuldet und gelingt beim naechsten Aufruf, sobald
+ein Slot frei ist. Ein Revert haette N-41 wieder aufgemacht, ein blosses Ueberspringen haette den
+Agenten dauerhaft verfallen lassen (siehe naechster Absatz).
+Tests: `testN42_RevivalCannotBreachTheWalletCap`, `testN42_DeniedRevivalIsNotForfeited`.
+
+**N-41 — `cacheTier` revertete, wo es zurueckkehren sollte.**
+`cacheTier` wird best-effort aus `advanceScan`, `attack` und `feed` gerufen, hatte aber zwei Reverts
+und keinen Weg zu sagen "hier ist nichts zu tun". Fuer eingesammelte, verlassene Agenten — genau die
+Population, die der Sweep laufend erzeugt — schlug jeder `advanceScan`-Aufruf mit `"starved"` fehl.
+Ein solcher Agent in einer Batch-Schleife stoppt den ganzen Lauf.
+Fix: jeder Zweig, der "nicht jetzt" entscheidet, kehrt zurueck statt zu reverten (unrevealed,
+starved, refunded, kein Slot). Zusaetzlich: der Schnellpfad ist jetzt `tierCached && !dead` statt
+`tierCached` allein — ein toter Agent traegt noch eine offene Frage (ist dieser Tod geschuldet?),
+also darf er nicht am Eingang abgewiesen werden. Ohne das waere die erste abgelehnte Wiederbelebung
+still endgueltig geworden, weil `tierCached` bereits gesetzt war.
+Test: `testN41_AdvanceScanSurvivesStarvedAgents`. Der alte
+`testDerivedRule_StarvedAgentStaysDead` pruefte den Revert-Text; er prueft jetzt das Ergebnis (tot,
+nicht spielbar, kein Slot) — die Regel ist unveraendert, nur der Mechanismus.
+
+**N-43 — ein erstatteter Mint kam zurueck.** Beim Pruefen der neuen Bedingungen gegen alle bereits
+gesetzten Bedingungen desselben Objekts (Muster 3) gefunden, nicht gemeldet.
+`reclaimUnrevealed` zahlt die 99 USDG zurueck und setzt `dead`. Kehrt der Keeper spaeter zurueck und
+entsteht endlich eine lebende Epoche, ist `epochEnd(firstLive) > lastFed + LIFE` erfuellt — der
+Agent wird wiederbelebt. Der Besitzer haette sein Geld **und** einen spielbaren Agenten, womit der
+Mint genau die kostenlose Option auf den Rang waere, die N-19 verhindern sollte. Reichweite: exakt
+das Ausfall-Szenario, fuer das die Erstattung existiert.
+Fix: `refunded[id]` blockiert die Wiederbelebung.
+Test: `testN43_RefundedAgentCannotComeBack`.
+
+**Beobachtung zu den Invarianten (uebernommen).** Die randomisierte Agent-Maschine faengt N-42 nicht
+— die noetige Folge (Cap fuellen, Sweep abwarten, neu fuellen, Cursor schieben) ist zu spezifisch,
+als dass sie zufaellig entsteht. Invarianten sichern die Buchhaltung; ein Szenario, das niemand
+beschreibt, findet auch der Fuzzer nicht.
+
+**Offen, kein Code-Befund:** der Audit-Text nimmt an, der Keeper-Bot rufe `advanceScan` in einer
+Schleife. Er tut es nicht — `advanceScan` steht in `keeper/keeper.mjs` nur im ABI, der Tick ruft es
+nirgends. Die Batch-Unterbrechung trifft damit heute Dritte (UI, Skripte), nicht den ausgelieferten
+Bot. Ob der Bot die Roster-Schleife bekommen soll, ist eine Betriebsentscheidung.
+
 ## Nicht gefunden (geprueft)
 - Flash-Loan-Manipulation des TWAP: Spot -75% in einem Block bewegt TWAP 0 bps (Stresstest).
 - Cayman-Inflation: Index-basiert, keine Share-Ratio -> kein First-Depositor-Vektor.

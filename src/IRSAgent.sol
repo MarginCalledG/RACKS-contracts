@@ -71,6 +71,8 @@ contract IRSAgent is ERC721, ReentrancyGuard {
     event TierRevealed(uint256 indexed id, uint8 tier);
     event Reaped(uint256 indexed id);
     event Revived(uint256 indexed id);
+    /// N-42: an owed revival that found no free slot. Silent on-chain, visible off-chain.
+    event RevivalDeferred(uint256 indexed id);
     event Attacked(uint256 indexed id, uint32 epoch);
     event Claimed(uint256 indexed id, uint32 epoch, uint256 amount);
 
@@ -162,29 +164,49 @@ contract IRSAgent is ERC721, ReentrancyGuard {
     /// agent would have starved, it never had a chance. No flag, no keeper dependency.
     /// That also makes a death undoable in exactly that case, and only in it — so the sweep can be
     /// plain and time-based again, and sweeping an agent that was stuck in an outage is harmless.
+    /// N-41: this is called best-effort from advanceScan, attack and feed, so it must never revert
+    /// on "there is nothing to do here". It used to have two reverts, and the population the sweep
+    /// produces continuously — collected, abandoned agents — hit the second one on every single
+    /// advanceScan. One such agent stopped the keeper's whole batch (there is no try/catch around
+    /// it in keeper.mjs). Every branch below that decides "not now" returns instead.
     function cacheTier(uint256 id) public {
+        if (_ownerOf(id) == address(0)) return;                 // N-21: no storage for phantom ids
         R storage r = agents[id];
-        if (r.tierCached) return;
+        // The fast path is "tier pinned AND nothing left to decide". A dead agent still carries an
+        // open question — is this death owed back? — so it must fall through, or the first denied
+        // revival would silently become permanent.
+        if (r.tierCached && !r.dead) return;
         (uint32 e, bool found) = _firstLive(id);
         bytes32 sd = found ? seedSource.seed(e) : bytes32(0);   // read once, not three times
-        require(sd != bytes32(0), "unrevealed");
-        uint8 t = _tierOf(sd, id);
-        r.cachedTier = t; r.tierCached = true;
+        if (sd == bytes32(0)) return;                            // not revealed yet is not an error
+        if (!r.tierCached) {
+            uint8 t = _tierOf(sd, id);
+            r.cachedTier = t; r.tierCached = true;
+            emit TierRevealed(id, t);
+        }
         // N-20 + N-23: LIFE must not run while an agent cannot be revealed — but the clock must
         // start at the moment the agent BECAME playable, not when somebody happens to call this.
         // Using block.timestamp turned cacheTier into a revival button: a starved agent came back
         // with one call from anyone, making the feeding fee optional for the first cycle. The start
         // is the end of the first live epoch — deterministic, identical for every caller, forever.
         uint256 start = epochEnd(e);
-        bool neverHadAChance = start > uint256(r.lastFed) + LIFE;
         if (r.dead) {
             // a death it could not avoid is undone; a death from not feeding is not (N-23)
-            require(neverHadAChance, "starved");
-            r.dead = false; livingCount++; ownedLiving[_ownerOf(id)]++;
+            if (start <= uint256(r.lastFed) + LIFE) return;      // starved: stays dead, forever
+            // N-43: the mint fee has already been paid back. Reviving now would hand the owner a
+            // playable agent for free and make the mint an option on the tier.
+            if (refunded[id]) return;
+            // N-42: a revival re-occupies a slot, so it has to pass the same two caps a mint does.
+            // Without this, waiting out the sweep and minting a fresh batch doubled a wallet's
+            // position — MAX_PER_WALLET is the anti-sybil measure in a pari-mutuel game.
+            // Returning (not reverting) leaves lastFed untouched, so the revival stays owed and
+            // succeeds on the next call once a slot is free.
+            address o = _ownerOf(id);
+            if (ownedLiving[o] >= MAX_PER_WALLET || livingCount >= CAP) { emit RevivalDeferred(id); return; }
+            r.dead = false; livingCount++; ownedLiving[o]++;
             emit Revived(id);
         }
         if (start > r.lastFed) r.lastFed = uint40(start);
-        emit TierRevealed(id, t);
     }
 
     function alive(uint256 id) public view returns (bool) {

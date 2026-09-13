@@ -450,7 +450,14 @@ contract RegressionN is Test {
         vm.startPrank(other); usdg.approve(address(ag), type(uint256).max);
         for (uint256 i; i < 3; i++) ag.mint();
         vm.stopPrank();
-        vm.expectRevert(bytes("starved")); ag.cacheTier(id);    // no revival for a fed-neglect death
+        // N-41 changed the mechanism, not the rule: cacheTier no longer reverts with "starved",
+        // it returns and leaves the agent dead. What is asserted here is the outcome, which is the
+        // thing that matters — a fed-neglect death is never undone.
+        ag.cacheTier(id);                                       // must not revert (N-41)
+        (,, bool dead,,) = ag.agents(id);
+        assertTrue(dead, "no revival for a fed-neglect death");
+        assertFalse(ag.alive(id), "and it is not playable");
+        assertEq(ag.ownedLiving(p), 0, "nor does it hold a slot");
         vm.prank(p); vm.expectRevert(bytes("dead")); ag.attack(id);
     }
 
@@ -474,6 +481,152 @@ contract RegressionN is Test {
         assertTrue(ag.alive(id), "a death it could not avoid is undone");
         vm.prank(p); ag.attack(id);
         assertEq(ag.ownedLiving(p), 1, "counters restored exactly");
+    }
+
+    // N-42: the revival branch bumps livingCount and ownedLiving without re-checking the caps.
+    // Wait out the sweep, mint a fresh batch, then let anyone push the cursors: the old batch comes
+    // back on top of the new one. MAX_PER_WALLET is the anti-sybil measure in a pari-mutuel game
+    // where the payout share follows the number of agents, so this doubles a position.
+    function testN42_RevivalCannotBreachTheWalletCap() public {
+        (IRSAgent ag, HashChainSeed src, address keeper) = _casino();
+        address alice = address(0x9500); usdg.mint(alice, 50_000 ether);
+        vm.startPrank(alice); usdg.approve(address(ag), type(uint256).max);
+        uint256[] memory first = new uint256[](10);
+        for (uint256 i; i < 10; i++) first[i] = ag.mint();
+        vm.stopPrank();
+        assertEq(ag.ownedLiving(alice), 10, "wallet cap reached");
+
+        // outage past LIFE + the refund window; the amortised sweep collects the batch
+        vm.warp(block.timestamp + 11 days);
+        address other = address(0x9501); usdg.mint(other, 50_000 ether);
+        vm.startPrank(other); usdg.approve(address(ag), type(uint256).max);
+        for (uint256 i; i < 4; i++) ag.mint();              // 12 reap steps for 10 agents
+        vm.stopPrank();
+        assertEq(ag.ownedLiving(alice), 0, "the sweep freed every slot");
+
+        // so a second full batch fits
+        vm.startPrank(alice);
+        for (uint256 i; i < 10; i++) ag.mint();
+        vm.stopPrank();
+        assertEq(ag.ownedLiving(alice), 10, "second batch at the cap");
+
+        // the outage ends; anyone may push the cursors forward
+        uint32 e = ag.currentEpoch();
+        vm.prank(keeper); src.reveal(e, _next(src, keeper));
+        vm.warp(ag.epochEnd(e)); vm.roll(block.number + 1);
+        src.captureClose(e); vm.roll(block.number + 2); src.captureClose(e);
+        vm.warp(block.timestamp + 1 hours);
+        for (uint256 i; i < 10; i++) { ag.advanceScan(first[i]); ag.advanceScan(first[i]); }
+
+        emit log_named_uint("ownedLiving[alice] after the revival", ag.ownedLiving(alice));
+        emit log_named_uint("MAX_PER_WALLET                      ", ag.MAX_PER_WALLET());
+        assertLe(ag.ownedLiving(alice), ag.MAX_PER_WALLET(), "revival must not breach the wallet cap");
+        assertLe(ag.livingCount(), ag.CAP(), "nor the global cap");
+    }
+
+    // and once a wallet frees a slot, the revival it was denied must still be available — otherwise
+    // the cap check would quietly turn into a permanent forfeit for an agent that never had a chance
+    function testN42_DeniedRevivalIsNotForfeited() public {
+        (IRSAgent ag, HashChainSeed src, address keeper) = _casino();
+        address alice = address(0x9510); usdg.mint(alice, 50_000 ether);
+        vm.startPrank(alice); usdg.approve(address(ag), type(uint256).max);
+        uint256 old = ag.mint();
+        vm.stopPrank();
+
+        vm.warp(block.timestamp + 11 days);
+        address other = address(0x9511); usdg.mint(other, 50_000 ether);
+        vm.startPrank(other); usdg.approve(address(ag), type(uint256).max);
+        ag.mint(); vm.stopPrank();
+        assertEq(ag.ownedLiving(alice), 0, "swept");
+
+        vm.startPrank(alice);
+        uint256[] memory fresh = new uint256[](10);
+        for (uint256 i; i < 10; i++) fresh[i] = ag.mint();
+        vm.stopPrank();
+
+        uint32 e = ag.currentEpoch();
+        vm.prank(keeper); src.reveal(e, _next(src, keeper));
+        vm.warp(ag.epochEnd(e)); vm.roll(block.number + 1);
+        src.captureClose(e); vm.roll(block.number + 2); src.captureClose(e);
+        vm.warp(block.timestamp + 1 hours);
+
+        ag.advanceScan(old); ag.advanceScan(old);            // denied: no room
+        assertFalse(ag.alive(old), "not revived while the wallet is full");
+        assertEq(ag.ownedLiving(alice), 10, "still exactly at the cap");
+
+        // alice moves one of the fresh agents away, which frees a slot
+        vm.prank(alice); ag.transferFrom(alice, address(0x9512), fresh[0]);
+        assertEq(ag.ownedLiving(alice), 9, "slot freed");
+
+        ag.advanceScan(old);                                  // the revival is still owed
+        assertTrue(ag.alive(old), "a death it could not avoid is still undoable");
+        assertEq(ag.ownedLiving(alice), 10, "back at the cap, never above it");
+    }
+
+    // N-41: cacheTier is called best-effort from advanceScan, but had two reverts and no way to say
+    // "nothing to do here". A swept, abandoned agent made every advanceScan call revert with
+    // "starved" — and the keeper bot has no try/catch around it, so one such agent stops the batch.
+    function testN41_AdvanceScanSurvivesStarvedAgents() public {
+        (IRSAgent ag, HashChainSeed src, address keeper) = _casino();
+        address p = address(0x9520); usdg.mint(p, 50_000 ether);
+        vm.startPrank(p); usdg.approve(address(ag), type(uint256).max);
+        uint256[] memory ids = new uint256[](5);
+        for (uint256 i; i < 5; i++) ids[i] = ag.mint();
+        vm.stopPrank();
+
+        // these agents WERE revealed — they had their chance and simply were never fed
+        uint32 e0 = ag.currentEpoch();
+        vm.prank(keeper); src.reveal(e0, _next(src, keeper));
+        vm.warp(ag.epochEnd(e0)); vm.roll(block.number + 1);
+        src.captureClose(e0); vm.roll(block.number + 2); src.captureClose(e0);
+
+        // starve, then let the sweep collect them
+        vm.warp(block.timestamp + 11 days);
+        address other = address(0x9521); usdg.mint(other, 50_000 ether);
+        vm.startPrank(other); usdg.approve(address(ag), type(uint256).max);
+        for (uint256 i; i < 2; i++) ag.mint();               // 6 reap steps for 5 agents
+        vm.stopPrank();
+        for (uint256 i; i < 5; i++) {
+            (,, bool dead,,) = ag.agents(ids[i]);
+            assertTrue(dead, "collected by the sweep");
+        }
+
+        // the keeper's batch walks the roster. Not one of these may stop it.
+        for (uint256 i; i < 5; i++) ag.advanceScan(ids[i]);
+        for (uint256 i; i < 5; i++) {
+            assertFalse(ag.alive(ids[i]), "a death from not feeding stays (N-23)");
+        }
+    }
+
+    // Found while fixing the two above: reclaimUnrevealed refunds the mint and marks the agent dead,
+    // but nothing stops cacheTier from reviving it once the keeper returns and a live epoch appears.
+    // The owner would keep the 99 USDG and get a playable agent — the mint as a free option.
+    function testN43_RefundedAgentCannotComeBack() public {
+        (IRSAgent ag, HashChainSeed src, address keeper) = _casino();
+        usdg.mint(address(0x8E5E), 10_000 ether);
+        vm.prank(address(0x8E5E)); usdg.approve(address(ag), type(uint256).max);
+
+        address p = address(0x9530); usdg.mint(p, 50_000 ether);
+        vm.startPrank(p); usdg.approve(address(ag), type(uint256).max);
+        uint256 id = ag.mint(); vm.stopPrank();
+
+        // total outage: no epoch since the mint ever gets a seed
+        vm.warp(block.timestamp + 11 days);
+        ag.advanceScan(id); ag.advanceScan(id);
+        uint256 before = usdg.balanceOf(p);
+        vm.prank(p); ag.reclaimUnrevealed(id);
+        assertEq(usdg.balanceOf(p) - before, ag.MINT_PRICE(), "mint fee returned");
+
+        // the keeper comes back and a live epoch finally exists
+        uint32 e = ag.currentEpoch();
+        vm.prank(keeper); src.reveal(e, _next(src, keeper));
+        vm.warp(ag.epochEnd(e)); vm.roll(block.number + 1);
+        src.captureClose(e); vm.roll(block.number + 2); src.captureClose(e);
+        vm.warp(block.timestamp + 1 hours);
+        ag.advanceScan(id); ag.advanceScan(id);
+
+        assertFalse(ag.alive(id), "a refunded mint must not become playable again");
+        assertEq(ag.ownedLiving(p), 0, "and must not occupy a slot");
     }
 
     // ---- helpers ----
