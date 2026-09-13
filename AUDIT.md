@@ -966,6 +966,43 @@ Geprueft und gehalten:
 - **Melt** — die exempte Quelle haelt ihren Nominalwert ueber 120 Tage; faellt der `setExempt`-Schritt
   im Deploy weg, laeuft die Zaehlung der Balance davon und `syncBond()` repariert genau das.
 
+## Runde 39 — swapTax gegen boesartige Router
+11 Eigenschaften fuer den permissionless Tax-Pfad, getrieben von vier Angreifer-Routern: ein
+ehrlicher, einer der die RACKS behaelt und nichts liefert, einer der aus dem Swap heraus
+zurueckruft, und einer der einen Kurs quotiert, den niemand erfuellen kann. Kein Befund.
+
+Geprueft und gehalten:
+- **Bounty nur bei Erfolg (Z1)** — fuenf Versuche gegen einen Router, der nichts liefert, zahlen
+  null; die Tax bleibt unberuehrt, weil `executeTaxSwap` extern ist und der Fehlschlag nur den Swap
+  zurueckrollt.
+- **Ein unerfuellbarer Kurs pausiert**, bricht nichts und zahlt nichts.
+- **Ein kaputter Router bricht keinen Verkauf** — der Verkaeufer kommt durch.
+- **`swapTax` ist nicht wiedereintrittsfaehig** (`inSwap`).
+- **Die Freigabe begrenzt den Router** — ein zweiter `transferFrom` im selben Call sprengt die
+  Allowance und rollt alles zurueck.
+- **Impact-Deckel** — eine Konvertierung nimmt nie mehr als `maxSwapBps` der Pair-Reserve.
+- **Router, SPY und Reserve sind nach der Erstkonfiguration fix** (alle drei Reverts einzeln
+  geprueft).
+- **Die wartende Tax meltet nicht** und besteuert sich nicht selbst (60 Tage).
+- **Unter dem Threshold** passiert nichts und niemand wird fuer den Aufruf bezahlt.
+
+**Beobachtung, kein Befund: die X4-Ausnahme im `guarded`-Modifier wird nie erreicht.**
+`guarded` erlaubt Wiedereintritt, wenn `inSwap` gilt und der Aufrufer der Router ist. Der einzige
+Weg zu `_swapTax` ist aber `swapTax()`, und das traegt **kein** `guarded`. Waehrend der gesamten
+Konvertierung ist `_entered` daher 0 und jeder geschuetzte Einstiegspunkt steht ohnehin allen offen —
+dem Router wie jedem Dritten. Das ist derzeit unbedenklich: waehrend einer Konvertierung ist kein
+Nutzer-Transfer halb fertig, und `swapTax()` selbst ist ueber `inSwap` gesichert.
+Festgehalten wird es, weil die Ausnahme ein aufgeweiteter Schutz fuer einen Pfad ist, den es nicht
+mehr gibt (die In-Transfer-Konvertierung, die X1 entfernt hat). Wird eine In-Transfer-Konvertierung je
+wieder eingebaut, oeffnet sich diese Ausnahme von selbst und nichts schlaegt laut fehl. Der Modifier
+wurde bewusst NICHT geaendert — er ist korrekt, falls der Pfad zurueckkehrt, und harmlos, solange
+nicht. Der Test `testSwap_GuardStateDuringAConversion` haelt den Ist-Zustand fest statt eine
+Eigenschaft zu behaupten, die der Code nicht hat.
+
+**Methodisch, zum Mitschreiben:** der erste Entwurf dieses Tests nutzte `meltPool()` als Sonde fuer
+den Guard. `meltPool()` ist absichtlich **nicht** guarded (externer Self-Call aus `_preOp`), taugt
+also nicht als Probe. Wer hier weiterprueft, muss einen geschuetzten Einstiegspunkt nehmen.
+
 ## Nicht gefunden (geprueft)
 - Flash-Loan-Manipulation des TWAP: Spot -75% in einem Block bewegt TWAP 0 bps (Stresstest).
 - Cayman-Inflation: Index-basiert, keine Share-Ratio -> kein First-Depositor-Vektor.
