@@ -67,10 +67,19 @@ im selben Call mit pair.sync() verheiratet -> Reserven und Balance laufen NIE au
 kann kein "UniswapV2: K" sehen.
 - `setPair(p)` — verlangt, dass p bereits melt-exempt ist; setzt isDex + capExempt + pairIndex.
 - `meltPool()` — permissionless, wendet Melt an und synct atomar. Bounty MELT_BOUNTY_BPS = 25 (0.25%
-  des Pool-Melts) an externe Caller; MEV-Bots erledigen den Job damit von selbst.
-- `_preOp()` ruft `try this.meltPool() catch {}` immer wenn der Pool nachhinkt (selbstheilend, nicht
-  nur bei Epochenwechsel). BEWUSST kein nonReentrant auf meltPool: der externe Self-Call rollt bei
-  gelocktem Pair (mitten im Swap) alles zurueck, statt Melt ohne Sync stehenzulassen.
+  des Pool-Melts) an externe Caller. **Nicht** darauf verlassen, dass MEV-Bots das von selbst
+  erledigen: 0,25 % des Pool-Melts, denominiert in einem Token, dessen gesamter Markt der Seed-Pool
+  ist, sind einstellige Dollarbetraege. Der Cron ist der Primaerpfad, nicht der Fallback. Bei
+  `meltPool` ist das folgenlos (selbstheilend), bei `swapTax` und `vault.advance()` haengt der
+  Betrieb real am Keeper.
+- `_preOp()` ruft `try this.meltPool() catch {}` **nur beim Epochenwechsel**
+  (`epochNow() > pairEpoch`) — aus Gaskosten. Selbstheilend ist der Pfad trotzdem, aber ueber den
+  permissionless externen `meltPool()`, nicht ueber `_preOp`. Innerhalb einer Epoche ist die
+  Pair-Balance also NICHT konstant; unschaedlich, weil Melt und Sync atomar sind. (Dieser Absatz
+  behauptete frueher "immer wenn der Pool nachhinkt" und widersprach damit dem
+  Melt-Faktoren-Abschnitt weiter oben, der es korrekt beschreibt.)
+  BEWUSST kein nonReentrant auf meltPool: der externe Self-Call rollt bei gelocktem Pair (mitten im
+  Swap) alles zurueck, statt Melt ohne Sync stehenzulassen.
 - Reihenfolge ist kritisch: _preOp laeuft VOR jedem _credit in _move. Beim Sell schiebt der Router
   RACKS ins Pair und ruft dann swap; der Sync sieht die eingehenden Token also noch nicht —
   sonst rechnete der Router amountIn == 0.
@@ -79,7 +88,8 @@ Fork-Beweise (test/v4/V2AtomicMelt.t.sol, test/v4/V2MeltAdversarial.t.sol):
 - 12 Epochenwechsel OHNE Keeper/Cron: jeder Buy und jeder Sell geht durch, kein einziger Revert.
 - Sell als erste TX nach einem Epochenwechsel: funktioniert.
 - Reserven == Pair-Balance nach jeder Epoche.
-- Melt im Preis: 995.015 -> 603.222 RACKS pro SPY nach 7 Tagen.
+- Melt im Preis: 995.015 -> 777.070 RACKS pro SPY nach 7 Tagen (gemessen gegen RH-Mainnet.
+  Die frueher hier stehenden 603.222 stammten aus dem Modell VOR der 0,5x-Stufe fuer das Pair.)
 - Bounty nicht farmbar (100 Wiederholungen zahlen 0), Pool-Melt folgt exakt dem Index,
   LP kommt immer raus, Round-Trip um den Melt herum verliert Geld, Pool-Melt verkleinert die Supply.
 
@@ -121,14 +131,22 @@ ohne Keeper OK.
 NACH dem Launch: `transferOwnership(multisig)` + `acceptOwnership()`, dann `renounceExemptControl()`.
 
 ## ZUFALLSQUELLE (src/HashChainSeed.sol + keeper/) — reveal-then-play
-Ein Seed pro Epoche aus ZWEI Komponenten, zwei Parteien, keine steuert allein:
+Ein Seed pro Epoche aus ZWEI Komponenten. **Gegen den Keeper** steuert keine Partei allein; gegen
+den Sequencer sehr wohl — siehe "Restvertrauen" am Ende dieses Abschnitts. Das Preimage verhindert
+Keeper-Grinding, es fuegt gegen einen Sequencer-Angreifer KEINE Entropie hinzu.
 - Der vorab committete Kettenwert des Keepers, enthuellt am EPOCHENANFANG. Ab dann oeffentlich —
   fuer niemanden ein Vorteil, denn er entscheidet allein nichts.
 - Ein Blockhash NACH Epochenschluss, in ZWEI Schritten erfasst (C1): die erste Transaktion nach dem
   Ende fixiert eine ZUKUENFTIGE Blocknummer (Hash existiert noch nicht — wer wann anfasst, gewinnt
   nichts); eine spaetere Transaktion innerhalb von 256 Bloecken friert diesen Hash ein (kann ihn nur
   festhalten, nicht waehlen). Verfaellt das Fenster, wird erneut eine Zukunftsnummer gesetzt.
-  Der Keeper-Bot tickt alle 15 s, damit das Einfrieren sicher innerhalb der ~64 s passiert.
+  **Zum Fenster (N-45):** `block.number` ist auf dieser Orbit-Chain die Nummer der ELTERNKETTE, nicht
+  die L2-Hoehe — auf dem Mainnet gemessen: block.number 25.971.156 gegen arbBlockNumber 62.269.858.
+  256 Bloecke sind damit rund **51 Minuten**, nicht die frueher hier stehenden ~64 s. Der 15-s-Takt
+  des Bots ist dadurch grosszuegiger als gedacht, nicht knapper. Zweite Folge: rund 48 L2-Bloecke
+  teilen sich eine `block.number`, die Entropie ist also grobkoerniger als ein Zug pro L2-Block —
+  einer pro ~12 s Kettenzeit. `test/v4/BlockhashProbe.t.sol` assertiert beides jetzt, statt es
+  nur zu behaupten.
   Verfaellt das Fenster, FAELLT die Epoche und der Keeper wird geslasht (R7-2) — kein Re-Roll, sonst
   koennte wer den geminten Hash schon gesehen hat auf einen besseren Kandidaten warten.
 seed(e) = keccak(preimage_e, closeHash_e). Der Keeper kennt ein Ergebnis NIE vor Epochenschluss.
@@ -138,9 +156,12 @@ Enthuellen ist NUR bis zum Epochenende erlaubt (C6) — der Keeper sieht den Pos
 Verbleibende Keeper-Macht: innerhalb der Epoche spaet enthuellen oder gar nicht. Preis:
 1. Keine Enthuellung bis Epochenende = Epoche FAILED, jeder verliert, auch der Keeper.
 2. `requiredBond()` = max(slashPerMiss, Pot) ist die SOLL-Kaution; `attack()` verweigert, solange die
-   Kaution darunter liegt (bondOk). Ein einzelner Slash nimmt hoechstens ein Viertel der Kaution
-   (SLASH_DIVISOR), damit ein Keeper-Ausfall sie nicht potenziert — jeder Slash landet im Pot und
-   wuerde sonst den naechsten erhoehen (R7-1).
+   Kaution darunter liegt (bondOk). Ein einzelner Slash ist auf max(Kaution/SLASH_DIVISOR,
+   slashPerMiss) gedeckelt, damit ein Keeper-Ausfall sie nicht potenziert — jeder Slash landet im Pot
+   und wuerde sonst den naechsten erhoehen (R7-1). **Das Viertel ist ein Deckel UEBER dem Floor, keine
+   Zusage:** sobald Kaution/4 unter `slashPerMiss` faellt, gewinnt der Floor und ein einzelner Miss
+   nimmt mehr als ein Viertel — im Grenzfall die ganze Kaution (N-45, Test
+   `testSeed_FloorOverridesTheQuarterCap`).
    Der Keeper haftet erst ab `firstEpoch` (Zeitpunkt seines commit) — Epochen aus der Pausenzeit
    sind nicht slashbar, ebenso wenig Epochen ohne Angreifer.
    Die Kaution haengt am Keeper-Slot: bei Keeper-Wechsel geht sie in den Pot, nicht an den Nachfolger.
@@ -151,8 +172,22 @@ Verbleibende Keeper-Macht: innerhalb der Epoche spaet enthuellen oder gar nicht.
 5. Quellentausch (`executeVrf`) nur, wenn alle Epochen mit Angreifern gesettlet sind; Tiers werden
    beim ersten Reveal gecacht (`cacheTier`, automatisch beim ersten Angriff) und ueberleben den
    Wechsel (R7-3).
-Restvertrauen, dokumentiert: der Post-Close-Blockhash stammt vom RH-Sequencer, der nichts zu
-gewinnen hat. Wer auch das nicht will: CCIP-Relay ueber proposeVrf. chain.json ist ein pot-wertiges
+Restvertrauen, dokumentiert — **der Sequencer ist die eine Partei, die den Seed allein bestimmen
+kann.** Enthuellen ist nur bis zum Epochenende erlaubt, das Preimage ist also oeffentlich, BEVOR der
+Close-Hash existiert. Wer den Close-Block produziert, kennt damit beide Komponenten und kann den
+Seed waehlen. Das schuetzt gegen den Keeper (er sieht das Ergebnis nie zuerst), nicht gegen den
+RH-Sequencer, der hier als nicht am Spiel beteiligt angenommen wird. Fuer ein Auszahlungsspiel ist
+das eine echte Vertrauensannahme und gehoert in den Launch-Text. Wer sie nicht will: CCIP-Relay
+ueber proposeVrf (7 Tage Timelock).
+**Achtung bei der Reihenfolge der Renounces (N-46):** `setExempt` haengt an
+`exemptControlRenounced`, und die Seed-Quelle ist melt-exempt, damit die Kaution nicht schmilzt.
+Wird `renounceExemptControl()` VOR `renounceVrfControl()` gezogen, kann eine ueber `executeVrf`
+installierte ERSATZ-Quelle nie melt-exempt gemacht werden: ihre Kaution schmilzt mit 4,2-6,9 %/Tag,
+waehrend `requiredBond()` stehenbleibt. Gemessen: 20 Mio RACKS Kaution sind nach 30 Tagen bei 2,34
+Mio und nach 60 Tagen unter der Deckungslinie — `bondOk()` kippt von allein und das Casino sperrt
+sich selbst, bis der Keeper dauerhaft nachschiesst.
+**Regel: `renounceExemptControl()` erst, nachdem `renounceVrfControl()` gezogen wurde** (oder gar
+nicht). Test: `testSeed_RenouncingExemptControlTrapsAReplacementSource`. chain.json ist ein pot-wertiges
 Geheimnis und wird wie der Keeper-Key behandelt.
 Griefing, dokumentiert (C7): jeder kann per `fundPot` den Pot ueber die Kaution heben und damit
 Angriffe sperren, bis der Keeper nachschiesst — auf eigene Kosten, das Geld bleibt im Pot.
@@ -263,7 +298,10 @@ Keeper-Gaskosten: 3x advance + burnExpired + meltPool + swapTax pro Tick.
 - SPY `uiMultiplier` (ERC-8056): falls ein Split die On-Chain-Balance rebased, waere der v2-Pool per
   `skim()` abgreifbar. Vor Mainnet mit RH klaeren.
 
-## ENTSCHEIDUNG VOR DEM DEPLOY: Launch-Cap (R9-5)
+## ENTSCHIEDEN: Launch-Cap bleibt bei 1 % (R9-5)
+Vom Owner so entschieden; hier nur noch als Rechnung dokumentiert, nicht als offene Frage.
+Hinweis zur Zahl: das Ledger bucht NETTO (nach 8 % Launch-Tax), eine Wallet erwirbt brutto also
+`cap / 0,92` ~ 1,087 % der Supply, rund $55 statt $51.
 Der Cap ist 1 % der Supply, und der Pool startet mit 100 % der Supply gegen 6,45 SPY (~$5.000).
 1 % der Supply ist damit ~1 % der Reserve — exakt gerechnet (v2 exact-out, 0,3 % Fee):
 

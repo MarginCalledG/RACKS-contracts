@@ -1097,6 +1097,85 @@ Contracts. Das Skript sagt es in der Konsolenausgabe, das Runbook nennt "innerha
 Test haelt fest, dass die Zwei-Schritt-Uebergabe wirkt; die Dauer des Fensters ist eine Frage des
 Betriebs.
 
+## Runde 42 — externer Bericht, nachgeprueft (N-45, N-46)
+Ein externer Durchgang meldete sechs Punkte. Alle nachgeprueft, alle bestaetigt. Zwei davon sind
+Code-/Test-Befunde, vier sind Doku-Drift. Nichts davon ist ausnutzbar; N-46 kann das Casino
+allerdings dauerhaft sperren.
+
+**N-45 — `block.number` ist die Nummer der ELTERNKETTE, nicht die L2-Hoehe.**
+Gegen RH-Mainnet gemessen, dreifach:
+- `NUMBER`-Opcode via `eth_call`: `0x18c49ba` = 25.971.130
+- Header-Feld `l1BlockNumber`: `0x18c49ba` — identisch
+- Header-Feld `number` (L2): `0x3b61d97` = 62.266.775
+`blockhash()` ist auf diese Nummerierung gekeyt und verhaelt sich korrekt: `number-255` liefert
+einen Hash, `number-300` und `number` liefern null. Der Mechanismus TRAEGT also — falsch war das
+abgeleitete Zeitmodell.
+Folgen: 256 Bloecke sind rund **51 Minuten**, nicht die dokumentierten ~64 s. Der 15-s-Takt des
+Keepers ist dadurch grosszuegiger als angenommen, nicht knapper. Und rund 48 L2-Bloecke teilen sich
+eine `block.number`, die Entropie ist also ein Zug pro ~12 s Kettenzeit statt pro L2-Block.
+Der eigentliche Fehler lag im Test: `BlockhashProbe` schrieb "block.number is the chain's own
+height" in den Kommentar und assertierte davon **nichts** — er prueft nur Non-Zero ueber 32 Bloecke
+und ging gruen durch, waehrend die Annahme, fuer die er geschrieben wurde, verletzt war. Der Probe
+misst und assertiert jetzt beide Nummern gegeneinander sowie die Raender des 256-Fensters.
+
+**N-45b — `SLASH_DIVISOR`-Kommentar widerspricht dem Code.**
+Der Kommentar sagte "one miss can never cost more than a quarter of the bond". `slashAmount()` hebt
+den Deckel danach aber auf den Floor: `if (cap < slashPerMiss) cap = slashPerMiss`. Sobald
+Kaution/4 unter `slashPerMiss` faellt, nimmt ein einzelner Miss mehr als ein Viertel — im Grenzfall
+alles. Genau in dem Regime, in dem die Kaution klein ist, gilt die Zusage also nicht.
+Der Code bleibt: der Floor ist eine bewusste Entscheidung (N-10), und eine Kaution, die den Floor
+nicht deckt, ist keine schuetzenswerte Kaution. Korrigiert wurde der Kommentar, und die tatsaechliche
+Regel ist als Test verankert: `testSeed_FloorOverridesTheQuarterCap`.
+
+**N-46 — die beiden Renounce-Schalter kollidieren.**
+`setExempt` haengt an `exemptControlRenounced`. Das Deploy macht die Seed-Quelle melt-exempt, weil
+die Kaution nicht schmelzen darf. Die Seed-Quelle ist aber das EINE Bauteil, das bewusst
+austauschbar gehalten wurde (`proposeVrf`/`executeVrf`, 7 Tage Timelock). Wird
+`renounceExemptControl()` vor `renounceVrfControl()` gezogen, laesst sich eine Ersatzquelle zwar
+installieren, aber nie melt-exempt machen. Ihre Kaution schmilzt dann mit 4,2-6,9 %/Tag, waehrend
+`requiredBond() = max(Pot, slashPerMiss)` stehenbleibt.
+Gemessen: 20 Mio RACKS Kaution stehen nach 30 Tagen bei 2,34 Mio und nach 60 Tagen unter der
+Deckungslinie. `bondOk()` kippt von allein, `attack()` verweigert, das Casino sperrt sich selbst —
+ohne dass jemand etwas tut.
+Kein Code geaendert. Eine Ausnahme fuer die Seed-Quellen-Rolle waere eine Owner-Vollmacht, die einen
+Renounce ueberlebt, und das widerspricht dem Zweck des Renounce. Stattdessen als harte
+Reihenfolgeregel in STATUS und Runbook: **`renounceExemptControl()` erst nach
+`renounceVrfControl()`** — oder gar nicht. Wenn der Owner die Ausnahme lieber im Contract haette,
+ist das seine Entscheidung, nicht meine.
+Test: `testSeed_RenouncingExemptControlTrapsAReplacementSource`.
+
+**Das Zwei-Parteien-Bild der Zufallsquelle hielt nicht.** STATUS sagte "zwei Parteien, keine steuert
+allein". Gegen den Keeper stimmt das. Gegen den Sequencer nicht: Enthuellen ist nur bis Epochenende
+erlaubt, das Preimage ist also oeffentlich, BEVOR der Close-Hash existiert — wer den Close-Block
+produziert, kennt beide Komponenten und kann den Seed waehlen. Das Preimage verhindert
+Keeper-Grinding, es fuegt gegen einen Sequencer-Angreifer keine Entropie hinzu. Das Restvertrauen war
+weiter unten bereits dokumentiert, aber das Zwei-von-Zwei-Bild darueber widersprach ihm. Fuer ein
+Auszahlungsspiel ist das kein Detail; die Formulierung ist raus, STATUS und keeper/README nennen die
+Annahme jetzt beim Namen.
+
+**Doku-Drift, verifiziert und korrigiert:**
+- `_preOp()` — STATUS behauptete im Pool-Melt-Abschnitt "immer wenn der Pool nachhinkt
+  (selbstheilend, nicht nur bei Epochenwechsel)". Der Code ist
+  `if (p != address(0) && epochNow() > pairEpoch)` — reiner Epochenwechsel. Der Melt-Faktoren-Abschnitt
+  derselben Datei sagte es korrekt; zwei Abschnitte, ein Widerspruch.
+- Melt im Preis — STATUS nannte 995.015 -> 603.222 RACKS pro SPY nach 7 Tagen. Selbst gegen
+  RH-Mainnet nachgemessen: **777.070**. Die alte Zahl stammt aus dem Modell vor der 0,5x-Stufe fuers
+  Pair.
+- R9-5 stand als "ENTSCHEIDUNG VOR DEM DEPLOY … muss VOR dem Deploy fallen", obwohl entschieden —
+  ein externer Auditor liest das als offen. Jetzt als entschieden markiert, mit der Netto-Korrektur
+  aus Runde 41 (brutto ~1,087 %, ~$55).
+- Bounty-Oekonomie — "MEV-Bots erledigen den Job von selbst" stimmt bei dieser Groesse nicht:
+  0,25 % des Pool-Melts in einem Token, dessen gesamter Markt der Seed-Pool ist, sind einstellige
+  Dollarbetraege. Der Cron ist der Primaerpfad, nicht der Fallback. Bei `meltPool` folgenlos
+  (selbstheilend), bei `swapTax` und `vault.advance()` haengt der Betrieb real am Keeper.
+
+**Offen, bewusst nicht angefasst:** die strukturell gedeckelte Markttiefe. Der Pool startet mit
+100 % der Supply gegen 6,45 SPY, die LP geht an 0x…dEaD, Hinzufuegen ist auf Token-Ebene ein
+besteuerter Sell und Entfernen ein besteuerter Buy (auf v2 nicht unterscheidbar), und die LP-Seite
+bleedet mit 0,5x. Niemand kann rational nachlegen, die Tiefe ist damit praktisch auf den Initial-Seed
+festgenagelt. Das folgt aus bereits getroffenen Entscheidungen (Abschnitt 3 und 10), stand aber
+nirgends als eine Aussage. Gehoert in den Launch-Text — als Produkteigenschaft, nicht als Bug.
+
 ## Nicht gefunden (geprueft)
 - Flash-Loan-Manipulation des TWAP: Spot -75% in einem Block bewegt TWAP 0 bps (Stresstest).
 - Cayman-Inflation: Index-basiert, keine Share-Ratio -> kein First-Depositor-Vektor.

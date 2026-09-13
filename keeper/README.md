@@ -12,13 +12,13 @@ max(floor, current pot) from its bond into the pot. Attacks are refused while th
 Post-close entropy is captured in TWO steps: the first transaction after an epoch's end fixes a
 FUTURE block number (its hash does not exist yet, so nobody gains by choosing when to touch); a later
 transaction freezes that block's hash (it can only be recorded, not chosen). The freeze must happen
-within 256 blocks (~64 s on RH), so the bot ticks every 15 s. If the window lapses the epoch FAILS and the keeper is slashed — freezing in time is the keeper's
+within 256 blocks. N-45: block.number on this Orbit chain is the PARENT chain's number, not the L2 height, so 256 blocks is about 51 minutes, not ~64 s. The 15 s tick is comfortably inside that. If the window lapses the epoch FAILS and the keeper is slashed — freezing in time is the keeper's
 job, and re-rolling would hand a candidate choice to whoever already saw the mined hash.
 
 Reveal is only accepted BEFORE the epoch ends: the keeper can never see the post-close hash first.
 
 Residual trust (documented, not solved): the post-close block hash is produced by Robinhood's
-sequencer, which has no stake in the game. Removing even that is the CCIP upgrade path (proposeVrf).
+sequencer. Note this is a real trust assumption, not a two-of-two scheme: the preimage is public before the close hash exists, so whoever produces the close block knows both components and can choose the seed. The assumption is that the RH sequencer has no stake in the game. Removing even that is the CCIP upgrade path (proposeVrf).
 
 ## One-time setup
 1. `npm i ethers ethereum-cryptography`

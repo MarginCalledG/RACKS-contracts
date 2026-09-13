@@ -43,7 +43,10 @@ contract HashChainSeed is ReentrancyGuard {
     uint256 public remaining;
     uint32  public firstEpoch;          // R7-1: epochs before the commit are out of scope entirely
     bool    public committed;
-    uint256 public constant SLASH_DIVISOR = 4;   // one miss can never cost more than a quarter of the bond
+    /// N-45: the quarter is a CAP, not a guarantee. `slashAmount()` raises the cap to `slashPerMiss`
+    /// whenever bond/4 falls below it, so once the bond is small a single miss takes the floor —
+    /// up to the entire bond. The quarter only binds while bond/4 >= slashPerMiss.
+    uint256 public constant SLASH_DIVISOR = 4;   // caps one miss at a quarter of the bond, ABOVE the floor
     uint256 public slashPerMiss;                        // floor; the actual slash is max(this, pot)
     uint256 public bond;
 
@@ -243,6 +246,9 @@ contract HashChainSeed is ReentrancyGuard {
     }
     /// What a single miss actually takes: the requirement, capped so that an outage cannot compound
     /// the bond away (each slash lands in the pot, which would otherwise raise the next requirement).
+    /// The cap is max(bond/SLASH_DIVISOR, slashPerMiss) — the floor wins when the bond has shrunk,
+    /// so in that regime one miss CAN take more than a quarter, and at the limit all of it. That is
+    /// deliberate: a bond too small to cover the floor is not a bond worth protecting.
     function slashAmount() public view returns (uint256) {
         uint256 req = requiredBond();
         uint256 cap = bond / SLASH_DIVISOR;

@@ -150,6 +150,64 @@ contract AdversarialSeed is Test {
         vm.expectRevert(bytes("done")); src.slash(e1);
     }
 
+    // N-45: SLASH_DIVISOR is a cap ABOVE the floor, not a guarantee. Once bond/4 drops below
+    // slashPerMiss the floor wins, and a single miss can take more than a quarter — all of it, at
+    // the limit. The old comment promised the opposite; this pins what the code does.
+    function testSeed_FloorOverridesTheQuarterCap() public {
+        (IRSAgent ag, HashChainSeed src, address keeper) = _casino();
+        // bring the bond below 4x slashPerMiss so the floor is the binding term
+        src.setSlash(1_000_000 ether);
+        uint256 target = 2_000_000 ether;                    // bond/4 = 500k < floor of 1m
+        uint256 take = src.bond() - target;
+        vm.prank(keeper); src.withdrawBond(take);
+        assertEq(src.bond(), target, "bond parked below 4x the floor");
+        uint256 quarter = src.bond() / 4;
+        assertGt(src.slashAmount(), quarter, "one miss takes MORE than a quarter here");
+        assertLe(src.slashAmount(), src.bond(), "but never more than the bond");
+        ag;
+    }
+
+    // N-46: the two renounce switches collide. `setExempt` is gated on `exemptControlRenounced`,
+    // and the deploy makes the seed source melt-exempt because "the bond must not melt". But the
+    // seed source is the ONE component deliberately kept replaceable (agent.proposeVrf/executeVrf,
+    // 7-day timelock). Once exempt control is renounced, a REPLACEMENT source can be installed but
+    // can never be made melt-exempt — its bond then melts at the unlocked rate while
+    // requiredBond() = max(pot, slashPerMiss) does not move, so bondOk() fails and the casino
+    // refuses every attack until the keeper tops up, forever.
+    function testSeed_RenouncingExemptControlTrapsAReplacementSource() public {
+        (IRSAgent ag, HashChainSeed src, address keeper) = _casino();
+        src;
+        // the owner takes the irreversible step the runbook offers "after deliberation"
+        k.renounceExemptControl();
+
+        // later the VRF path is used to install a replacement source (this construction only works
+        // at all because of the N-44 fix — before it, the clock would have stayed at zero)
+        HashChainSeed src2 = new HashChainSeed(address(k), address(v), address(ag), 1_000_000 ether);
+        src2.setKeeper(keeper);
+        vm.expectRevert(bytes("renounced"));
+        k.setExempt(address(src2), true);                    // the bond can never be protected
+
+        k.mint(keeper, 50_000_000 ether);
+        vm.startPrank(keeper);
+        k.approve(address(src2), type(uint256).max);
+        src2.depositBond(20_000_000 ether);
+        vm.stopPrank();
+        uint256 posted = src2.bond();
+        uint256 required = src2.requiredBond();
+        assertGe(posted, required, "covered on day zero");
+
+        vm.warp(block.timestamp + 30 days); k.poke();
+        uint256 after30 = k.balanceOf(address(src2));
+        vm.warp(block.timestamp + 30 days); k.poke();
+        uint256 after60 = k.balanceOf(address(src2));
+        emit log_named_uint("Kaution gestellt     ", posted);
+        emit log_named_uint("nach 30 Tagen        ", after30);
+        emit log_named_uint("nach 60 Tagen        ", after60);
+        emit log_named_uint("durchgehend gefordert", required);
+        assertLt(after30, posted / 5, "an unexempt bond loses most of itself in a month");
+        assertLt(after60, required, "and falls under the cover line on its own, with nobody acting");
+    }
+
     function testSeed_WithdrawCannotUncoverTheStake() public {
         (, HashChainSeed src, address keeper) = _casino();
         uint256 req = src.requiredBond();
