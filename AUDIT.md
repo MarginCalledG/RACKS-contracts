@@ -1052,6 +1052,51 @@ Weiter geprueft und gehalten:
 aufgefuehrt ist. Das Deploy-Skript uebergibt die Orakel-Ownership an die Multisig (Zeile 114), der
 Punkt gehoert also in dieselbe Liste wie `setTaxOracle`.
 
+## Runde 41 — die Deploy-Sequenz Fenster fuer Fenster
+Unter `--broadcast` ist jede Zeile von `Deploy.s.sol` eine eigene Transaktion in einem eigenen Block.
+Jeder Zwischenzustand ist also mindestens einen Block lang oeffentlich und angreifbar — genau daraus
+entstand P1 (Sniper mit 13,38 % der Supply, null Tax). 9 Eigenschaften, ein Angreifer in jedem
+Spalt. Kein Sicherheitsbefund.
+
+Geprueft und gehalten:
+- **Pair exempt, noch nicht `isDex`** — ein Aussenstehender hat keine RACKS, um den Pool zu seeden,
+  und das Gate laesst ihn ohnehin nicht an das Pair.
+- **Registriert, Handel noch zu** — das Gate weist Nicht-Exempte in BEIDE Richtungen ab: weder
+  hinein noch heraus.
+- **Liquiditaet drin, Gate zu** — haelt ueber einen vollen Blockwechsel, nicht nur innerhalb einer
+  Transaktion.
+- **`enableTrading` mit der gesamten Supply im exempten Pair** liefert trotzdem ein nutzbares Cap
+  (R5: ein Null-Cap haette jeden Kauf blockiert).
+- **Der erste Kaeufer nach `enableTrading`** zahlt ab dem ersten Block 8 % und faellt unter das Cap —
+  auch in den Bloecken, bevor der Deployer seine eigene Exemption ablegt.
+- **Der Deployer endet sauber**: keine RACKS, keine Tax-Exemption, keine Melt-Exemption.
+- **Zwei-Schritt-Ownership**: der Pending Owner hat vor `acceptOwnership` keinerlei Macht.
+- **Das registrierte Pair laesst sich nicht de-exemptieren** (hart im Contract).
+
+**Beobachtung 1: die Exemption des alten TAX_WALLET ueberlebt seine Rolle.**
+Schritt 1 setzt `taxWallet = TAX_WALLET` und macht die Adresse melt- und tax-exempt (Zeilen 66-68).
+Schritt 3b ruft `enableAutoSwap`, und das zeigt `taxWallet` auf den Token selbst um (Zeile 524 in
+Racks). Ab da hat die konfigurierte TAX_WALLET-Adresse **keine Rolle mehr**, behaelt aber beide
+Exemptions — RACKS, die dort geparkt werden, melten nie und handeln steuerfrei. Der Selbstcheck des
+Skripts prueft in Zeile 124 weiterhin genau diese Exemption, was so liest, als waere die Adresse
+aktiv. Nach `renounceExemptControl()` ist sie nicht mehr zurueckzunehmen. Kein Angriff, aber eine
+dauerhaft privilegierte Adresse ohne Aufgabe. Empfehlung: entweder die Exemption vor der Uebergabe
+zuruecknehmen, oder in Abschnitt 9 als Vertrauensannahme auffuehren.
+Test: `testDeploy_TaxWalletExemptionOutlivesItsRole`.
+
+**Beobachtung 2: das Launch-Cap ist netto, nicht brutto.** `_recordLaunch` bucht, was ANKOMMT, also
+nach Abzug der 8 % Launch-Tax. Eine Wallet kann daher brutto `cap / 0,92` erwerben, bevor sie
+blockiert wird — rund **1,087 % der Supply statt 1,00 %**. Bei der Seed-Liquiditaet sind das etwa
+55 statt 51 USD. Die Groessenordnung aus Abschnitt 10 stimmt, die Zahl im Launch-Text sollte die
+richtige sein.
+Test: die Assertion in `testWindow_FirstBuyerIsTaxedAndCappedImmediately`.
+
+**Nicht geschlossen, weil es kein Contract-Problem ist:** zwischen `enableTrading()` und dem
+`acceptOwnership()` der Multisig haelt der Deployer-EOA weiterhin jede Vollmacht ueber alle fuenf
+Contracts. Das Skript sagt es in der Konsolenausgabe, das Runbook nennt "innerhalb von Minuten". Der
+Test haelt fest, dass die Zwei-Schritt-Uebergabe wirkt; die Dauer des Fensters ist eine Frage des
+Betriebs.
+
 ## Nicht gefunden (geprueft)
 - Flash-Loan-Manipulation des TWAP: Spot -75% in einem Block bewegt TWAP 0 bps (Stresstest).
 - Cayman-Inflation: Index-basiert, keine Share-Ratio -> kein First-Depositor-Vektor.
