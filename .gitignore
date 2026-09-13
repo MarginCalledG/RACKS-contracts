@@ -1,0 +1,15 @@
+# Foundry build output
+out/
+cache/
+broadcast/
+
+# Environment / secrets
+.env
+.env.*
+
+# Keeper secrets — chain.json is a pot-valuable secret (siehe STATUS.md / Projektkontext)
+keeper/chain.json
+keeper/node_modules/
+
+# OS
+.DS_Store
