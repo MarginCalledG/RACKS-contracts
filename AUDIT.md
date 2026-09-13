@@ -885,6 +885,50 @@ Schleife. Er tut es nicht — `advanceScan` steht in `keeper/keeper.mjs` nur im 
 nirgends. Die Batch-Unterbrechung trifft damit heute Dritte (UI, Skripte), nicht den ausgelieferten
 Bot. Ob der Bot die Roster-Schleife bekommen soll, ist eine Betriebsentscheidung.
 
+## Runde 37 — systematischer Durchgang ausserhalb des Agenten (test/Adversarial.t.sol)
+Alle bisherigen Runden hingen am Agenten-Lebenszyklus. Dieser Durchgang formuliert 26 Eigenschaften
+fuer die Bereiche, die bisher am wenigsten Szenarioabdeckung hatten: der abgeleitete Pot, das
+Vault-Aggregat, die Launch-Schranken, der Tax-Pfad und das Melt-Gesetz. Keine neuen
+Sicherheitsbefunde.
+
+**Methodisch wichtig:** der erste Entwurf enthielt eine Solvenz-Pruefung der Form
+`owed + pendingBurn + pot <= balance`. Die kann nicht fehlschlagen, weil `potBalance()` genau als
+`balance - owed - pendingBurn` definiert ist — eine Tautologie, die aussieht wie ein Test. Die
+Pruefung lautet jetzt `owed + pendingBurn <= balance`: ob das Vault den Lockern mehr verspricht als
+es haelt. Wer diese Suite erweitert, sollte auf dieselbe Falle achten.
+
+Geprueft und gehalten:
+- **Pot** — Solvenz unter randomisierter Op-Mischung; vollstaendiger Exit aller Locker in zufaelliger
+  Reihenfolge, nachdem der Agent den Pot geleert hat; Dust-Flut aus 30 MIN_LOCK-Positionen gegen
+  einen Wal; Spende per Direkttransfer landet im Pot und in keinem Anspruch.
+- **Vault** — Lock/Unlock-Zyklus erzeugt nie Wert; zehn Relocks entkommen dem Melt nicht;
+  `advance(b,1)` dreihundertmal landet exakt dort, wo ein einziger voller Aufruf landet
+  (Settlement-Frequenz aendert kein Ergebnis); zwei Positionen im selben Bucket, eine vor und eine
+  nach dem Roll angefasst, konvertieren identisch; zwanzig `burnExpired()` in Folge brennen nichts
+  doppelt; zwei `setEpochLength`-Wechsel mit lebender 14d-Position stranden sie nicht;
+  `lockedSupply` enthaelt den Pot nicht.
+- **Launch** — das Cap-Ledger ist kumulativ ueber kaufen/wegschieben/kaufen; frische
+  Empfaenger-Contracts setzen es nicht zurueck (Buchung auf `tx.origin`, N11); nach dem Fenster faellt
+  das Cap ersatzlos; in der Launch-Stunde 8 % flach, auch wenn das Orakel 0,01 % sagen will.
+- **Tax** — ein Orakel, das 90 % verlangt, wird auf 8 % gedeckelt; ein revertierendes Orakel bricht
+  keinen Handel und bedeutet nie 0 %, sondern faellt auf die Basisrate; Wallet-zu-Wallet bleibt frei.
+- **Melt** — Reihenfolge 14d < 3d < 1d < LP < unlocked haelt ueber 200 Tage; Supply waechst unter
+  keiner Poke-Folge; nach 4000 Tagen liegt keine Position unter `minIndex`; `setEpochLength` bewegt
+  keinen Index sprunghaft.
+
+**Beobachtung, kein Befund: `transfer(balanceOf(x))` kann 1 wei stehen lassen.** `balanceOf` rundet
+scaled->nominal ab, `_debit` rundet nominal->scaled erneut ab; die Differenz bleibt als
+Scaled-Rest liegen. Gemessen ueber 0/1/3/30/180/900 Tage: hoechstens 1 wei, meist 0. Es entsteht kein
+Wert und es geht keiner verloren, aber ein Integrator, der von einem Voll-Transfer eine geleerte
+Adresse erwartet, wird ueberrascht. Der Transfer-Pfad wurde bewusst NICHT geaendert — ein Aufrunden
+wuerde den Empfaenger 1 wei mehr bekommen lassen, als `amount` sagt, und damit eine schaerfere
+Zusage brechen als die, die hier verletzt wird. Stattdessen ist die Schranke als Test verankert
+(`testToken_FullBalanceTransferResidueIsAtMostOneWei`) und gehoert in den Launch-Text.
+
+**Was dieser Durchgang NICHT ist:** kein Ersatz fuer das externe Audit. Er prueft Eigenschaften, die
+ich selbst formuliert habe — und der Auditor der Runde 36 hat recht damit, dass ein Szenario, das
+niemand beschreibt, auch hier nicht auftaucht.
+
 ## Nicht gefunden (geprueft)
 - Flash-Loan-Manipulation des TWAP: Spot -75% in einem Block bewegt TWAP 0 bps (Stresstest).
 - Cayman-Inflation: Index-basiert, keine Share-Ratio -> kein First-Depositor-Vektor.
