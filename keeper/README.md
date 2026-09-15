@@ -12,7 +12,7 @@ max(floor, current pot) from its bond into the pot. Attacks are refused while th
 Post-close entropy is captured in TWO steps: the first transaction after an epoch's end fixes a
 FUTURE block number (its hash does not exist yet, so nobody gains by choosing when to touch); a later
 transaction freezes that block's hash (it can only be recorded, not chosen). The freeze must happen
-within 256 blocks. N-45: block.number on this Orbit chain is the PARENT chain's number, not the L2 height, so 256 blocks is about 51 minutes, not ~64 s. The 15 s tick is comfortably inside that. If the window lapses the epoch FAILS and the keeper is slashed — freezing in time is the keeper's
+within 256 blocks. N-45: block.number on this Orbit chain is the PARENT chain's number, not the L2 height, so 256 blocks is about 51 minutes, not ~64 s. The default 60 s tick is comfortably inside that: the two-step capture takes two ticks instead of one, which costs nothing. The binding cadence is not the freeze window but the vault's 30-minute expiry bucket. If the window lapses the epoch FAILS and the keeper is slashed — freezing in time is the keeper's
 job, and re-rolling would hand a candidate choice to whoever already saw the mined hash.
 
 Reveal is only accepted BEFORE the epoch ends: the keeper can never see the post-close hash first.
@@ -31,6 +31,28 @@ sequencer. Note this is a real trust assumption, not a two-of-two scheme: the pr
 
 ## Run
 `RPC=... KEY=... SEED=... AGENT=... RACKS=... node keeper.mjs`
+
+Optional environment knobs, so testnet and mainnet can differ without a code change:
+
+| Variable | Default | What it does |
+|---|---|---|
+| `TICK_MS` | `60000` | how often the loop runs |
+| `MELT_MIN_S` | `1800` | minimum accrual before a pool melt is worth a transaction |
+| `LOW_GAS` | `0.002` | warn below this ETH balance on the keeper address |
+| `VAULT` | unset | enables the vault work (advance / burnExpired) |
+
+**N-51: the loop sends only when the contracts say there is work.** It used to fire six
+transactions unconditionally every tick — roughly 20,900 per day on testnet, of which a few dozen
+did anything. `advance` now runs only when an elapsed bucket actually holds a position (the bot
+reads `expiringAt` first, because reads are free and transactions are not), `burnExpired` only when
+`advance` did not already settle the burn clock, `meltPool` only after `MELT_MIN_S` of accrual, and
+`swapTax` only above `swapThreshold`. On an active day that is under a hundred transactions.
+
+**Do not switch `meltPool` and `swapTax` off on mainnet.** An earlier version of this file said MEV
+bots would handle them for the bounty. That was wrong at this size: 0.25 % of a pool melt,
+denominated in a token whose entire market is a ~$5,000 seed pool, is single-digit dollars. Nobody
+runs a bot for that. The cron is the primary path, not the fallback. For `meltPool` a lapse is
+self-healing; for `swapTax` and `advance` it is not.
 Run two instances on two machines with the same chain.json and a shared state file if you want
 redundancy: the second one just sees "resolved" and skips. Monitor `Failed` events on the seed
 contract — each one is a missed reveal and a slashed bond.

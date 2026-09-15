@@ -5,6 +5,13 @@ import { readFileSync, writeFileSync } from "node:fs";
 import { ethers } from "ethers";
 
 const { RPC, KEY, SEED, AGENT, RACKS, CHAIN = "./chain.json", STATE = "./keeper-state.json" } = process.env;
+// N-51: the tick used to fire six transactions unconditionally, every 15 s — about 20,900 per day,
+// of which roughly thirty did any work. Everything below now ASKS the contracts whether there is
+// work before sending. TICK_MS stays configurable so testnet and mainnet can differ without a code
+// change; MELT_MIN_S is the minimum accrual before a pool melt is worth a transaction.
+const TICK_MS    = Number(process.env.TICK_MS ?? 60_000);
+const MELT_MIN_S = Number(process.env.MELT_MIN_S ?? 1_800);
+const LOW_GAS    = ethers.parseEther(process.env.LOW_GAS ?? "0.002");
 const provider = new ethers.JsonRpcProvider(RPC);
 const wallet = new ethers.Wallet(KEY, provider);
 
@@ -15,8 +22,12 @@ const agentAbi = ["function advanceScan(uint256 id)", "function currentEpoch() v
                   "function settled(uint32 e) view returns (bool)", "function settledThrough() view returns (uint32)",
                   "function tallied(uint32 e) view returns (bool)", "function tally(uint32 e, uint256 count)",
                   "function settle(uint32 e)"];
-const racksAbi = ["function meltPool()", "function swapTax()"];
-const vaultAbi = ["function advance(uint8 tier, uint32 maxEpochs)", "function burnExpired()"];
+const racksAbi = ["function meltPool()", "function swapTax()", "function balanceOf(address) view returns (uint256)",
+                  "function swapThreshold() view returns (uint256)", "function autoSwap() view returns (bool)",
+                  "function pairLastMelt() view returns (uint64)", "function pair() view returns (address)"];
+const vaultAbi = ["function advance(uint8 tier, uint32 maxEpochs)", "function burnExpired()",
+                  "function rolledThrough(uint256) view returns (uint32)", "function pendingBurn() view returns (uint256)",
+                  "function BUCKET() view returns (uint256)", "function expiringAt(uint8,uint32) view returns (uint256)"];
 
 const seed  = new ethers.Contract(SEED,  seedAbi,  wallet);
 const agent = new ethers.Contract(AGENT, agentAbi, wallet);
@@ -74,16 +85,53 @@ async function tick() {
   // fallback cron for the token (bounties pay for these when they do something)
   // roll the vault's expiry buckets every epoch: a position changes regime exactly when advance()
   // runs, so lagging here lets expired positions keep bleeding at the tier rate instead of burning.
-  if (vault) { for (let t = 0; t < 3; t++) await send(`advance(${t})`, vault.advance, t, 64);
-               await send("burnExpired", vault.burnExpired); }
-  await send("meltPool", racks.meltPool);
-  await send("swapTax", racks.swapTax);
+  // --- from here on: only send when the contracts say there is something to do ---
+
+  // Buckets are 30 minutes wide, so advance() has work only once a bucket has fully elapsed.
+  // Gating on rolledThrough keeps the regime change as prompt as the bucket granularity allows,
+  // which is what the documented economics assume — an epoch-based trigger would leave an expired
+  // lock on the tier rate for up to 8 hours.
+  if (vault) {
+    const bucket = Number(await vault.BUCKET());
+    const nowBucket = Math.floor(now / bucket);
+    let rolled = false;
+    for (let t = 0; t < 3; t++) {
+      const from = Number(await vault.rolledThrough(t));
+      if (from >= nowBucket) continue;                       // no elapsed bucket at all
+      // Reads are free, transactions are not: only send if one of the elapsed buckets actually
+      // holds a position. Rolling empty buckets costs a full transaction and changes nothing.
+      let work = false;
+      for (let e = from; e < nowBucket && e < from + 64; e++) {
+        if ((await vault.expiringAt(t, e)) > 0n) { work = true; break; }
+      }
+      if (work) { await send(`advance(${t})`, vault.advance, t, 64); rolled = true; }
+    }
+    // advance() settles the burn clock itself, so a separate call is only needed when none fired.
+    if (!rolled && (await vault.pendingBurn()) > 0n) await send("burnExpired", vault.burnExpired);
+  }
+
+  // The pool melt is time-based and self-healing, so calling it every 15 s melted three-digit wei
+  // amounts at full gas. N-47 measured the cost of the other extreme: a day of silence deviates by
+  // 0 bps, so anything up to daily is free of accuracy loss. MELT_MIN_S sits far inside that.
+  const lastMelt = Number(await racks.pairLastMelt());
+  if (lastMelt > 0 && now - lastMelt >= MELT_MIN_S) await send("meltPool", racks.meltPool);
+
+  // swapTax returns without doing anything below the threshold — ask first.
+  if (await racks.autoSwap()) {
+    const [accrued, threshold] = await Promise.all([racks.balanceOf(RACKS), racks.swapThreshold()]);
+    if (accrued >= threshold) await send("swapTax", racks.swapTax);
+  }
+
+  // The bot dies silently when it runs out of gas, and then every epoch fails.
+  const gas = await provider.getBalance(wallet.address);
+  if (gas < LOW_GAS) console.error(`ALERT: keeper gas balance is ${ethers.formatEther(gas)} ETH — top up`);
 }
 
 console.log(`keeper ${wallet.address} — next reveal idx ${state.nextIdx}`);
 await tick();
 // C1: the close hash must be frozen within 256 blocks of being fixed. N-45: block.number here is
 // the PARENT chain's number, so 256 blocks is roughly 40-55 minutes, not the ~64 s an L2-paced
-// model implies. The 15 s tick is therefore comfortable for the freeze; what it is really sized
-// for is vault.advance() and the melt cadence (see N-47 in AUDIT.md).
-setInterval(() => tick().catch(console.error), 15 * 1000);
+// model implies. A 60 s tick therefore leaves the two-step capture ample room (it takes two ticks
+// instead of one), and the binding cadence is the vault's 30-minute bucket, not the freeze window.
+console.log(`tick every ${TICK_MS} ms — melt at most every ${MELT_MIN_S} s`);
+setInterval(() => tick().catch(console.error), TICK_MS);

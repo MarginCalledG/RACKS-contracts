@@ -1248,6 +1248,49 @@ keeper/README sagen das jetzt so.
 diese Historie nicht zu. Jeder Push ab `1c4a8e8` traegt seinen vollstaendigen Lauf im Commit-Text.
 Der Pflichtlauf vor dem Push bleibt trotzdem richtig und wird eingehalten.
 
+## Runde 44 — Keeper-Gasverbrauch (N-51)
+Dritter externer Auftrag, diesmal nur zum Bot. Problem 2 (fehlende Gas-Limits) und Problem 3
+(stille `catch {}`) waren in Runde 43 bereits umgesetzt — `send()`-Wrapper mit 50 % Aufschlag,
+Fehlschlagzaehler, Alarm ab drei in Folge. Problem 1 war neu und trifft zu.
+
+**N-51 — der Tick sendet sechs Transaktionen bedingungslos.** Im Code nachgelesen und bestaetigt:
+drei `advance`, ein `burnExpired`, `meltPool` und `swapTax`, alle 15 Sekunden, keine davon mit einer
+Pruefung, ob es etwas zu tun gibt. Rechnerisch 34.560 Transaktionen pro Tag; auf dem Testnet
+gemessen 20.900 (RPC-Latenz bremst). Der Kommentar darueber sprach von einem Fallback-Cron, gebaut
+war ein Dauerfeuer.
+
+Umgesetzt, aber anders als vorgeschlagen. Der Auftrag wollte die Arbeit **zeitlich** takten (nur beim
+Epochenwechsel, Cron alle 30 Minuten). Das loest das Symptom und bricht dabei eine dokumentierte
+Eigenschaft: Buckets sind 30 Minuten breit, ein epochengebundenes `advance` laesst eine abgelaufene
+Lock-Position bis zu **8 Stunden** auf der Tier-Rate stehen statt auf der Unlocked-Rate. Genau diese
+Kadenz ist in STATUS als die tragende benannt.
+
+Stattdessen fragt der Bot jetzt die Contracts, ob Arbeit da ist — alle noetigen Views sind oeffentlich:
+- `advance(t)` nur, wenn ein abgelaufener Bucket **tatsaechlich eine Position haelt**. Der Bot liest
+  dafuer `expiringAt(t, e)` ueber die offenen Buckets. Lesen ist gratis, Senden nicht; leere Buckets zu
+  rollen kostet eine volle Transaktion und aendert nichts.
+- `burnExpired()` nur, wenn kein `advance` gefeuert hat — `advance` settelt die Burn-Uhr selbst.
+- `meltPool()` erst nach `MELT_MIN_S` (Standard 1.800 s) Auflaufzeit. N-47 hat die Gegenprobe
+  geliefert: ein Tag Stille weicht um 0 bps ab, eine halbe Stunde ist also weit innerhalb des
+  verlustfreien Bereichs.
+- `swapTax()` nur oberhalb von `swapThreshold`.
+Dazu `TICK_MS` (Standard 60.000) und `LOW_GAS` als Umgebungsvariablen, plus eine Warnung, wenn das
+ETH-Guthaben der Keeper-Adresse unter die Schwelle faellt.
+
+Ergebnis im Modell: an einem aktiven Tag mit 20 Lock-Ablaeufen rund **91 Transaktionen** statt 34.560,
+Faktor ~380. Der groesste verbleibende Posten ist `meltPool` mit 48 — ueber `MELT_MIN_S` weiter
+reduzierbar, ohne Genauigkeit zu verlieren.
+
+**NICHT umgesetzt:** die Empfehlung, `meltPool` und `swapTax` auf Mainnet ganz wegzulassen, weil
+MEV-Bots sie fuer die Bounty erledigen. Der Auftrag zitiert dafuer `keeper/README.md` — aber genau
+dieser Satz wurde in Runde 42 als falsch korrigiert. 0,25 % eines Pool-Melts, denominiert in einem
+Token, dessen gesamter Markt ein ~5.000-$-Seed-Pool ist, sind einstellige Dollarbetraege; dafuer
+betreibt niemand einen Bot. Der Cron ist der Primaerpfad, nicht der Fallback. Beide Aufrufe bleiben
+drin, jetzt nur bedingungsgesteuert.
+
+Die Sofortmassnahme fuer den laufenden Testlauf (Tick auf 60 s, nachtanken) ist mit dem neuen
+Standardwert ohnehin erfuellt.
+
 ## Nicht gefunden (geprueft)
 - Flash-Loan-Manipulation des TWAP: Spot -75% in einem Block bewegt TWAP 0 bps (Stresstest).
 - Cayman-Inflation: Index-basiert, keine Share-Ratio -> kein First-Depositor-Vektor.
