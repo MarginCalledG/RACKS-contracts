@@ -23,9 +23,28 @@ Aenderungen ggue. dem alten Modell:
 - **Das Pair schmilzt mit 0,5x** statt voll; `meltPool` rechnet zeitbasiert ab pairLastMelt.
   Der SELF-Call aus _preOp feuert nur beim Epochenwechsel (Gaskosten); extern ist meltPool
   permissionless und meltet ab der ersten Sekunde. Die Balance ist innerhalb einer Epoche also NICHT
-  konstant — das ist unschaedlich, weil Melt und Sync atomar sind (kein K-Revert moeglich) und der
-  Gesamtmelt unabhaengig von der Aufrufhaeufigkeit ist. Die Atomaritaet ist die tragende Eigenschaft,
-  nicht die Epochen-Diskretisierung.
+  konstant — das ist unschaedlich, weil Melt und Sync atomar sind (kein K-Revert moeglich). Die
+  Atomaritaet ist die tragende Eigenschaft, nicht die Epochen-Diskretisierung.
+- **Der Gesamtmelt ist NICHT unabhaengig von der Aufrufhaeufigkeit (N-47).** Dieser Satz stand hier
+  frueher und ist falsch. Er gilt nur bei KONSTANTER Rate — und die Rate ist konstruktionsbedingt nie
+  konstant, weil sie am Freifloat haengt. Der Index-Roll bepreist die gesamte verstrichene Spanne mit
+  dem geglaetteten Freifloat, der beim Roll gilt, statt ueber den Pfad zu integrieren.
+  Gemessen (zwei identische Welten, einziger Unterschied ist der Tick):
+
+  | Luecke ohne Aufruf | Abweichung |
+  |---|---:|
+  | 1 Tag  | 0 bps |
+  | 7 Tage | 639 bps |
+  | 30 Tage | 3.633 bps |
+  | 90 Tage | 8.630 bps |
+
+  Richtung: **Stille schmilzt MEHR**, weil die veraltete Rate die schnellere ist. Betrifft alle drei
+  Indizes. Auf einem laufenden System liegt der Effekt bei null — deshalb ist es kein
+  Sicherheitsbefund, sondern eine Spezifikationsabweichung. Konsequenz fuer den Betrieb: **der
+  Keeper-Takt ist eine VORAUSSETZUNG der dokumentierten Oekonomie, keine Bequemlichkeit.** Der saubere
+  Fix waere ein kumulativer Ratenindex — ein Eingriff in den Kern fuer einen Effekt, den der Keeper
+  ohnehin auf null drueckt, und vor dem Launch nicht zu empfehlen.
+  Test: `test/MeltCadence.t.sol`.
 - Abgelaufene Locks schmelzen unveraendert mit Faktor 1,0 und werden GEBRANNT (nicht in den Pot).
 Reihenfolge bleibt garantiert: 14d < 3d < 1d < LP < unlocked (Test testLockingBeatsHolding).
 
@@ -187,8 +206,12 @@ waehrend `requiredBond()` stehenbleibt. Gemessen: 20 Mio RACKS Kaution sind nach
 Mio und nach 60 Tagen unter der Deckungslinie — `bondOk()` kippt von allein und das Casino sperrt
 sich selbst, bis der Keeper dauerhaft nachschiesst.
 **Regel: `renounceExemptControl()` erst, nachdem `renounceVrfControl()` gezogen wurde** (oder gar
-nicht). Test: `testSeed_RenouncingExemptControlTrapsAReplacementSource`. chain.json ist ein pot-wertiges
-Geheimnis und wird wie der Keeper-Key behandelt.
+nicht). Test: `testSeed_RenouncingExemptControlTrapsAReplacementSource`. chain.json ist ein
+**Verfuegbarkeits-Asset, kein Geheimnis** (N-50). Ein Leak erlaubt keine Vorhersage: jedes Urbild wird
+zu Beginn seiner Epoche ohnehin oeffentlich, und der Seed braucht zusaetzlich einen Close-Hash, den es
+vor Epochenende nicht gibt. Und wer die Datei hat, ist NICHT faktisch der Keeper — `reveal` ist
+`onlyKeeper`, ohne `setKeeper` ist die Datei wirkungslos. Das Risiko ist der VERLUST: dann geht es nur
+ueber `proposeChainReset` mit 3 Tagen Timelock. Also sichern, mehrfach und offline.
 Griefing, dokumentiert (C7): jeder kann per `fundPot` den Pot ueber die Kaution heben und damit
 Angriffe sperren, bis der Keeper nachschiesst — auf eigene Kosten, das Geld bleibt im Pot.
 Rollen: Multisig setzt/ersetzt den Keeper; Keeper committed, hinterlegt Kaution, enthuellt am Start;

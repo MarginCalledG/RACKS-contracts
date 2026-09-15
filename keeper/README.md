@@ -7,7 +7,7 @@ knows a result before attacks are closed, cannot choose values (the chain is fix
 gains nothing by withholding: a missed reveal fails the epoch for everyone, keeper included, and slashes
 max(floor, current pot) from its bond into the pot. Attacks are refused while the bond is below cover.
 
-**chain.json is a pot-sized secret.** Anyone holding it can act as keeper; treat it like the keeper key.
+**chain.json is an AVAILABILITY asset, not a secret.** Back it up; losing it is the real risk. It was previously described as a pot-sized secret, which overstated it in both directions: a leak does not let anyone predict a seed, because every preimage becomes public at the start of its epoch anyway and the seed additionally needs a close hash that does not exist until the epoch has ended. Nor does holding the file let anyone act as keeper — `reveal` is `onlyKeeper`, so without `setKeeper` the file is inert. What a leak does cost you is the option to rotate quietly. What a LOSS costs you is three days: the only way back is `proposeChainReset` plus its timelock.
 
 Post-close entropy is captured in TWO steps: the first transaction after an epoch's end fixes a
 FUTURE block number (its hash does not exist yet, so nobody gains by choosing when to touch); a later
@@ -22,7 +22,7 @@ sequencer. Note this is a real trust assumption, not a two-of-two scheme: the pr
 
 ## One-time setup
 1. `npm i ethers ethereum-cryptography`
-2. `node generate-chain.mjs 100000 > chain.json` — **keep chain.json secret, back it up offline**.
+2. `node generate-chain.mjs 100000 > chain.json` — **back it up offline, in more than one place**. Losing it costs three days (see above); leaking it does not hand anyone the keeper role.
    The command prints the chain END; that is the only value that goes on-chain.
 3. Multisig: `HashChainSeed.setKeeper(<bot address>)`.
 4. Keeper: `HashChainSeed.commit(<chain end>, 100000)`, then `depositBond(<RACKS>)`

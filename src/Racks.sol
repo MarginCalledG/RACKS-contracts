@@ -53,13 +53,15 @@ contract Racks is ReentrancyGuard {
     uint32 internal _posEpoch;
 
     /// cumulative index of a position type — same law, same floor, integrated over time
+    /// N-47: this used to carry its OWN copy of the decay arithmetic, identical to decayIndex().
+    /// That is the "same rule, two implementations" pattern this project keeps getting caught by,
+    /// and here it was worse than duplication: production reads posIndex, while the melt-law
+    /// property suites assert against decayIndex — so a change to this function could not have
+    /// turned those suites red. One implementation, and the property suites now cover the live path.
     function posIndex(uint8 p) public view returns (uint256) {
         uint256 e = epochNow();
         uint256 steps = e > _posEpoch ? e - _posEpoch : 0;   // monotonic now; guard kept as a net
-        uint256 i = steps == 0
-            ? _posIdx[p]
-            : RayMath.rmul(_posIdx[p], RayMath.rpow(perSecFactorFor(p), steps * epochLength));
-        return i < minIndex ? minIndex : i;
+        return decayIndex(_posIdx[p], p, steps * epochLength);
     }
 
     function _factorEnds(uint8 pos) internal pure returns (uint256 f0, uint256 f1) {

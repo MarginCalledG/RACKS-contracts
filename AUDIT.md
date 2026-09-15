@@ -1176,6 +1176,78 @@ bleedet mit 0,5x. Niemand kann rational nachlegen, die Tiefe ist damit praktisch
 festgenagelt. Das folgt aus bereits getroffenen Entscheidungen (Abschnitt 3 und 10), stand aber
 nirgends als eine Aussage. Gehoert in den Launch-Text — als Produkteigenschaft, nicht als Bug.
 
+## Runde 43 — zweiter externer Auftrag, nachgeprueft (N-47 bis N-50)
+Ein Arbeitsauftrag meldete acht Punkte. **Der Auftrag bezieht sich auf einen anderen Repo-Stand:**
+Commit `f9b8a61` existiert hier nicht, er nennt elf Audit-Runden (AUDIT.md hat 42) und das Repo
+`Racks-contracts` statt `RACKS-contracts`. Jeder Punkt wurde deshalb einzeln gegen DIESEN Stand
+geprueft, statt ihn zu uebernehmen. Fuenf trafen zu und sind umgesetzt, einer war bereits erledigt,
+zwei sind falsch und wurden NICHT umgesetzt.
+
+**N-47 — der Gesamtmelt haengt doch von der Aufrufhaeufigkeit ab.** Bestaetigt und selbst gemessen.
+`posIndex` bepreist die gesamte verstrichene Spanne mit dem geglaetteten Freifloat, der beim Roll
+gilt, statt ueber den Pfad zu integrieren. Bei konstanter Rate identisch; die Rate ist nie konstant.
+Zwei identische Welten, einziger Unterschied der Tick: 1 Tag 0 bps, 7 Tage **639**, 30 Tage **3.633**,
+90 Tage **8.630**. Andere Zahlen als im Auftrag (74 / 1.841 / 21.496), weil die Freifloat-Kurve eine
+andere ist — das Phaenomen und die Groessenordnung stimmen. Richtung: **Stille schmilzt MEHR**, weil
+die veraltete Rate die schnellere ist.
+Kein Code geaendert. Der saubere Fix waere ein kumulativer Ratenindex, also ein Eingriff in den Kern
+fuer einen Effekt, den ein laufender Keeper auf null drueckt. Stattdessen: der Satz in STATUS ist
+korrigiert, der Keeper-Takt ist dort jetzt als VORAUSSETZUNG der dokumentierten Oekonomie benannt, und
+die Abweichung ist als Test verankert (`test/MeltCadence.t.sol`).
+
+**N-47b — `decayIndex` war nicht toter Code, sondern eine zweite Implementierung.**
+Der Auftrag empfahl, `decayIndex` zu loeschen, weil `src/` es nicht aufruft. Das stimmt, aber die
+Schlussfolgerung war falsch: `test/MeltLawProperty.t.sol` und `test/MeltFactors.t.sol` pruefen das
+Melt-Gesetz **ueber `decayIndex`**, waehrend die Produktion ueber `posIndex` laeuft — dieselbe Formel,
+zweimal geschrieben. Loeschen haette die Testoberflaeche entfernt und die Duplikation stehengelassen.
+Schlimmer noch: eine Aenderung an `posIndex` haette die Melt-Gesetz-Suiten nicht rot gemacht.
+Gefixt in die andere Richtung: `posIndex` ruft jetzt `decayIndex`. Eine Implementierung, und die
+Property-Suiten decken den Live-Pfad ab. Nebeneffekt: Racks ist 93 Bytes kleiner.
+
+**N-48 — kein Gas-Limit im Keeper-Bot.** Zutreffend. Der erste Aufruf einer neuen Epoche loest den
+Index-Roll aus und schreibt fuenf Positionsindizes plus den Holder-Index — faellt die Epochengrenze
+zwischen Schaetzung und Ausfuehrung, ist die Schaetzung zu niedrig. Bei `meltPool` kostet das nur Gas,
+bei `reveal` und `captureClose` scheitert die Epoche und die Kaution wird geslasht.
+Alle acht Schreibaufrufe laufen jetzt ueber einen `send()`-Wrapper mit 50 % Aufschlag. Zusaetzlich
+zaehlt er Fehlschlaege pro Aufrufart und meldet ab drei in Folge laut, statt sie in `catch {}` zu
+schlucken.
+
+**N-49 — `TAX_WALLET` behaelt Exemptions ohne Rolle.** In Runde 41 als Beobachtung notiert, jetzt mit
+einem Testnetz-Vorfall belegt: war `TAX_WALLET` dieselbe Adresse wie der Deployer, wurden dessen
+Kaeufe **nicht gegen das Launch-Cap gezaehlt**, weil `_recordLaunch` fuer melt-exempte Adressen frueh
+zurueckkehrt. Das Cap war schlicht aus.
+Das Skript raeumt jetzt am Ende beide Flags ab und verlangt vorher, dass `TAX_WALLET` weder Deployer
+noch Keeper noch Multisig noch Reserve ist. Der Selbstcheck assertierte bisher das Gegenteil
+(`isExempt(taxWallet)` musste wahr sein) und las sich, als waere die Adresse noch aktiv — jetzt
+assertiert er, dass kein Privileg uebrig bleibt.
+
+**N-50 — `chain.json` ist kein Geheimnis.** Zutreffend, und es korrigiert etwas, das ich selbst
+uebernommen hatte. Ein Leak erlaubt keine Vorhersage: jedes Urbild wird zu Beginn seiner Epoche
+ohnehin oeffentlich, und der Seed braucht zusaetzlich den Close-Hash, den es vor Epochenende nicht
+gibt. Und wer die Datei hat, ist nicht faktisch der Keeper — `reveal` ist `onlyKeeper`. Das Risiko ist
+der VERLUST (3 Tage Timelock ueber `proposeChainReset`), nicht der Diebstahl. STATUS und
+keeper/README sagen das jetzt so.
+
+**Bereits erledigt:** der `~64 s`-Kommentar zum Capture-Fenster steht in `src/` nirgends mehr; Runde
+42 hatte ihn korrigiert. Im Keeper stand er noch und ist jetzt weg.
+
+**NICHT umgesetzt, weil falsch:**
+1. *"Foundrys Fork setzt `block.number` auf die L2-Hoehe und bildet das echte Verhalten nicht ab.
+   Jede `vm.roll`-basierte Aussage ist im Fork-Test wertlos."* — **Gegenteil gemessen.** Der Fork
+   liefert `block.number` = 25.971.134 bei einer L2-Hoehe von 62,2 Mio., also exakt die Elternketten-
+   Nummer wie die echte Kette (Header-Feld `l1BlockNumber` gegengeprueft). Der Fork bildet das
+   Verhalten korrekt ab. Diese Warnung in den Probe zu schreiben haette eine falsche Aussage ins Repo
+   gestellt.
+2. *Die begleitenden RPC-Zahlen* (`eth_blockNumber` ~120 Mio., `NUMBER` ~11,7 Mio., Verhaeltnis ~10)
+   passen nicht zu dem, was auf RH-Mainnet steht (62,2 Mio. / 25,97 Mio., Verhaeltnis ~2,4). Die
+   Schlussfolgerung — `block.number` ist die Elternketten-Nummer, 256 Bloecke sind rund 40-55 Minuten —
+   stimmt und deckt sich mit Runde 42. Die Messwerte stammen offenbar von einer anderen Kette,
+   vermutlich dem Testnetz.
+
+**Zum Hinweis "beim letzten Mal wurde ein Commit mit rotem Regressionstest hochgeladen":** trifft auf
+diese Historie nicht zu. Jeder Push ab `1c4a8e8` traegt seinen vollstaendigen Lauf im Commit-Text.
+Der Pflichtlauf vor dem Push bleibt trotzdem richtig und wird eingehalten.
+
 ## Nicht gefunden (geprueft)
 - Flash-Loan-Manipulation des TWAP: Spot -75% in einem Block bewegt TWAP 0 bps (Stresstest).
 - Cayman-Inflation: Index-basiert, keine Share-Ratio -> kein First-Depositor-Vektor.

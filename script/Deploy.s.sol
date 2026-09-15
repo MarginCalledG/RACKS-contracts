@@ -105,6 +105,19 @@ contract DeployScript is Script {
         require(IERC20d(pair).transfer(c.lpDestination, lp), "lp move failed");
         racks.setTaxExempt(c.me, false);              // deployer is now an ordinary trader
 
+        // N-49: enableAutoSwap repointed taxWallet at the token itself, so the address configured as
+        // TAX_WALLET has had no role since step 3b — but it kept both exemptions, and after
+        // renounceExemptControl() they could never be withdrawn. On testnet this bit for real: with
+        // TAX_WALLET set to the deployer's own address, _recordLaunch skipped every deployer buy,
+        // because it returns early for melt-exempt addresses. The launch cap was simply not applied.
+        // Clean both flags up here rather than leaving a permanently privileged address behind.
+        require(c.taxWallet != c.me,       "TAX_WALLET must not be the deployer");
+        require(c.taxWallet != c.keeper,   "TAX_WALLET must not be the keeper");
+        require(c.taxWallet != c.multisig, "TAX_WALLET must not be the multisig");
+        require(c.taxWallet != c.reserve,  "TAX_WALLET must not be the reserve");
+        racks.setExempt(c.taxWallet, false);
+        racks.setTaxExempt(c.taxWallet, false);
+
         // S1: hand over EVERY contract, not just the token. The vault holds the lockers' funds and
         // the pot; leaving it on the deployer EOA would keep a single key able to swap the agent
         // (after the timelock) and drain the pot. All four use 2-step ownership.
@@ -121,7 +134,11 @@ contract DeployScript is Script {
         require(racks.pair() == pair && racks.pairIndex() != 0, "setPair missing");
         require(racks.isDex(pair), "pair not marked as dex");
         require(racks.capExempt(pair), "pair must be cap-exempt (it is the distributor)");
-        require(racks.isExempt(c.taxWallet), "tax wallet must be melt-exempt");
+        // N-49: the configured TAX_WALLET is NOT the live tax wallet after enableAutoSwap, and must
+        // hold no leftover privilege. The old check asserted the opposite and read as if the address
+        // were still active.
+        require(!racks.isExempt(c.taxWallet),    "configured TAX_WALLET must keep no melt exemption");
+        require(!racks.isTaxExempt(c.taxWallet), "configured TAX_WALLET must keep no tax exemption");
         require(racks.taxOracle() == address(oracle), "oracle not wired");
         require(racks.mintRenounced(), "mint not renounced");
         require(racks.tradingStart() != 0, "trading not enabled");

@@ -28,6 +28,29 @@ let state = { nextIdx: chain.length - 1 };                         // reveal fro
 try { state = JSON.parse(readFileSync(STATE, "utf8")); } catch {}
 const save = () => writeFileSync(STATE, JSON.stringify(state));
 
+// N-48: never rely on the node's gas estimate alone. The FIRST call of a new epoch triggers the
+// index roll and writes five position indices plus the holder index — about 23k gas more than any
+// other call. If the epoch boundary falls between the estimate and execution, the estimate is too
+// low and the transaction runs out of gas. For meltPool that costs only gas (the melt is
+// time-based and catches up), but a missed reveal or captureClose FAILS the epoch and slashes the
+// bond. Unused gas is refunded, so the headroom is nearly free; a failure costs the whole limit.
+const failures = new Map();
+async function send(label, fn, ...args) {
+  try {
+    const est = await fn.estimateGas(...args);
+    const tx = await fn(...args, { gasLimit: (est * 3n) / 2n });
+    await tx.wait();
+    failures.delete(label);
+    return true;
+  } catch (e) {
+    const n = (failures.get(label) ?? 0) + 1;
+    failures.set(label, n);
+    console.error(`${label} failed (${n} in a row): ${e.shortMessage ?? e.message}`);
+    if (n >= 3) console.error(`ALERT: ${label} has failed ${n} times in a row — investigate now`);
+    return false;
+  }
+}
+
 async function tick() {
   const now = Math.floor(Date.now() / 1000);
   const cur = Number(await agent.currentEpoch());
@@ -38,27 +61,29 @@ async function tick() {
     const pre = chain.chain[state.nextIdx];
     if (ethers.keccak256(pre) !== (await seed.head())) { console.error("chain out of sync at idx", state.nextIdx); process.exit(2); }
     console.log(`reveal epoch ${cur} (start) with chain[${state.nextIdx}]`);
-    await (await seed.reveal(cur, pre)).wait();
-    state.nextIdx--; save();
+    if (await send("reveal", seed.reveal, cur, pre)) { state.nextIdx--; save(); }
   }
   // 2) for every closed epoch: capture post-close entropy, tally, settle
   for (let e = from; e < cur; e++) {
     // two-step capture: first call fixes a future block, the next call (a later block) freezes its hash
-    if (!(await seed.resolved(e))) { try { await (await seed.captureClose(e)).wait(); } catch {} }
+    if (!(await seed.resolved(e))) await send("captureClose", seed.captureClose, e);
     if (!(await seed.resolved(e))) continue;                 // failed or still no entropy
-    if (!(await agent.tallied(e))) { console.log(`tally ${e}`); await (await agent.tally(e, 200)).wait(); continue; }
-    if (!(await agent.settled(e))) { console.log(`settle ${e}`); await (await agent.settle(e)).wait(); }
+    if (!(await agent.tallied(e))) { console.log(`tally ${e}`); await send("tally", agent.tally, e, 200); continue; }
+    if (!(await agent.settled(e))) { console.log(`settle ${e}`); await send("settle", agent.settle, e); }
   }
   // fallback cron for the token (bounties pay for these when they do something)
   // roll the vault's expiry buckets every epoch: a position changes regime exactly when advance()
   // runs, so lagging here lets expired positions keep bleeding at the tier rate instead of burning.
-  if (vault) { for (let t = 0; t < 3; t++) { try { await (await vault.advance(t, 64)).wait(); } catch {} }
-               try { await (await vault.burnExpired()).wait(); } catch {} }
-  try { await (await racks.meltPool()).wait(); } catch {}
-  try { await (await racks.swapTax()).wait(); } catch {}
+  if (vault) { for (let t = 0; t < 3; t++) await send(`advance(${t})`, vault.advance, t, 64);
+               await send("burnExpired", vault.burnExpired); }
+  await send("meltPool", racks.meltPool);
+  await send("swapTax", racks.swapTax);
 }
 
 console.log(`keeper ${wallet.address} — next reveal idx ${state.nextIdx}`);
 await tick();
-// C1: the close hash must be frozen within 256 blocks of being fixed (~64 s on RH). Tick fast.
+// C1: the close hash must be frozen within 256 blocks of being fixed. N-45: block.number here is
+// the PARENT chain's number, so 256 blocks is roughly 40-55 minutes, not the ~64 s an L2-paced
+// model implies. The 15 s tick is therefore comfortable for the freeze; what it is really sized
+// for is vault.advance() and the melt cadence (see N-47 in AUDIT.md).
 setInterval(() => tick().catch(console.error), 15 * 1000);
