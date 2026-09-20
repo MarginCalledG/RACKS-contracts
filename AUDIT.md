@@ -1291,6 +1291,44 @@ drin, jetzt nur bedingungsgesteuert.
 Die Sofortmassnahme fuer den laufenden Testlauf (Tick auf 60 s, nachtanken) ist mit dem neuen
 Standardwert ohnehin erfuellt.
 
+## Runde 45 — nicht abgeholte Gewinne schmelzen nicht (N-52)
+Frage aus dem Betrieb: was passiert, wenn jemand seinen Gewinn einfach im Agenten stehen laesst,
+statt ihn abzuholen und zu locken? Nachgemessen, und die Antwort ist unerwartet.
+
+**Mechanik:** `settle()` zahlt nichts aus. Es schreibt `rewardPerShareRay[e]`, `epochUnclaimed[e]`
+und erhoeht `allocatedPot`. Die Token bleiben koerperlich im Vault; erst `claim()` ruft
+`vault.drawPot`. Der Vault ist aber **melt-exempt** und fuehrt eine Nominalbilanz — ein nicht
+abgeholter Gewinn schmilzt also **ueberhaupt nicht**.
+
+Gemessen ueber 29 Tage, dieselbe Menge, drei Ablageorte (`test/UnclaimedHolding.t.sol`):
+
+| Ablage | nach 29 Tagen | Verlust |
+|---|---:|---:|
+| Gehalten (unlocked) | 125.759 | 87,4 % |
+| 14-Tage-Lock (langsamste Stufe) | 818.081 | 18,2 % |
+| **Nicht abgeholt** | **1.000.000** | **0 %** |
+
+Damit ist "nicht abholen" die beste Aufbewahrung, die das Protokoll kennt — besser als jede
+Lock-Stufe, ohne Bindung und ohne Gebuehr. Rational holt ein Gewinner erst kurz vor dem Sweep ab
+(Epoche 89 von 90) und bekommt rund 29,7 Tage perfekte Werterhaltung geschenkt. Danach faellt er auf
+null: `sweepStale` ist permissionless und loescht den Anspruch vollstaendig.
+
+**Kein Sicherheitsbefund.** Die Buchhaltung stimmt: `allocatedPot` haelt die Token aus kuenftigen
+Preisgeldern heraus, es gibt kein Doppelvergeben, und `claim` deckelt die Auszahlung zusaetzlich auf
+`epochUnclaimed[e]`. Niemand wird bestohlen.
+
+**Aber es widerspricht der Erzaehlung in beiden Dokumenten**, die den Sweep ausschliesslich als Risiko
+des Gewinners beschreiben. Er ist zugleich eine kostenlose 30-Tage-Option auf Melt-Freiheit. Zweiter
+Effekt: diese Token liegen ausserhalb von U und L, zaehlen also weder als Free Float noch als locked,
+und der Burn, der bei sofortigem Abholen und Halten entstanden waere, findet nicht statt.
+
+Kein Code geaendert — das ist eine Design-Entscheidung des Owners, keine Fehlfunktion. Drei
+Moeglichkeiten, falls es geschlossen werden soll:
+1. So lassen und als Eigenschaft dokumentieren (das Fenster ist begrenzt, der Cliff hart).
+2. `CLAIM_WINDOW` verkuerzen — reduziert die Option, erhoeht das Risiko fuer ehrliche Gewinner.
+3. Den Anspruch beim Settle in Anteilen statt in Nominalbetraegen fuehren, sodass er mitschmilzt.
+   Das ist ein Eingriff in die Settle-/Claim-Buchhaltung und damit ein eigenes Audit wert.
+
 ## Nicht gefunden (geprueft)
 - Flash-Loan-Manipulation des TWAP: Spot -75% in einem Block bewegt TWAP 0 bps (Stresstest).
 - Cayman-Inflation: Index-basiert, keine Share-Ratio -> kein First-Depositor-Vektor.
