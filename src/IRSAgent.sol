@@ -226,7 +226,7 @@ contract IRSAgent is ERC721, ReentrancyGuard {
     function mint() external nonReentrant returns (uint256 id) {
         require(!paused, "paused");
         _reapSome(REAP_PER_MINT);                       // free up room BEFORE the cap is judged
-        require(ownedLiving[msg.sender] < MAX_PER_WALLET, "wallet cap");
+        require(ownedLiving[msg.sender] < MAX_PER_WALLET, "wallet cap: reap starved agents first");
         require(livingCount < CAP, "cap");
         require(usdg.transferFrom(msg.sender, reserve, MINT_PRICE), "pay");
         id = nextId++;
@@ -260,8 +260,21 @@ contract IRSAgent is ERC721, ReentrancyGuard {
             // Plain time, no flags: collecting an agent is no longer irreversible for one that
             // never had a chance (cacheTier undoes exactly that death), so the sweep does not need
             // to know which case it is looking at. The buffer keeps it clear of open refund claims.
+            //
+            // N-54: the buffer used to be LIFE + UNREVEALED_AFTER for EVERY agent — 10 days, while
+            // an agent is dead after 3. For seven days the amortised sweep did exactly nothing of
+            // what it was built for, and a wallet full of starved agents could not mint.
+            // The buffer only ever protected an open refund claim, and only an UNREVEALED agent has
+            // one: reclaimUnrevealed requires !revealed(id) && !tierCached. Once the tier is cached
+            // there is nothing left to protect.
+            // tierCached rather than revealed() on purpose: revealed() walks _firstLive, up to
+            // REVEAL_SCAN external calls, and this loop runs three times per mint. tierCached is one
+            // SLOAD and is set by attack, feed and advanceScan, so every agent that ever played has
+            // it. One that was revealed but never touched keeps the long buffer — slower, never
+            // wrong, and the permissionless reap(id) collects it immediately anyway.
+            uint256 grace = r.tierCached ? LIFE : LIFE + UNREVEALED_AFTER;
             if (o != address(0) && !r.dead
-                && block.timestamp > uint256(r.lastFed) + LIFE + UNREVEALED_AFTER) {
+                && block.timestamp > uint256(r.lastFed) + grace) {
                 r.dead = true; livingCount--; ownedLiving[o]--;
                 emit Reaped(id);
             }
@@ -269,6 +282,11 @@ contract IRSAgent is ERC721, ReentrancyGuard {
         reapCursor = id;
     }
 
+    /// N-54: what a holder with a wallet full of starved agents needs. Permissionless on purpose —
+    /// anyone may clean up, and there is nothing to gain from doing it. A separate owner-only
+    /// `release` was proposed; it would be this function with a narrower caller set, i.e. the same
+    /// rule implemented twice, which is the pattern this project keeps getting caught by.
+    /// It deliberately does NOT burn the NFT. See `reapable` for why.
     function reap(uint256 id) external {
         R storage r = agents[id];
         require(!r.dead, "n/a");
@@ -277,6 +295,23 @@ contract IRSAgent is ERC721, ReentrancyGuard {
         r.dead = true;
         livingCount--;
         ownedLiving[ownerOf(id)]--;
+    }
+
+    /// N-54: the frontend needs to tell a holder WHICH of their agents is blocking a slot. An
+    /// owner-indexed count would need ERC721Enumerable or an unbounded scan; this is O(1) and the
+    /// caller already knows its own token ids.
+    ///
+    /// On burning: reap leaves the NFT in place, and that is deliberate. Burning a reaped agent
+    /// would break two things. First, cacheTier still undoes the death of an agent that never had a
+    /// chance to play, and that case includes REVEALED agents (a long outage reveals an agent after
+    /// it has already starved), so a burn would destroy a revival that is still owed. Second,
+    /// claim() requires ownerOf(id) == msg.sender, so burning an agent that still holds an
+    /// unclaimed prize makes that prize permanently unclaimable until the sweep takes it.
+    /// Both are pinned by tests in test/ReapRelease.t.sol.
+    function reapable(uint256 id) external view returns (bool) {
+        R storage r = agents[id];
+        return _ownerOf(id) != address(0) && !r.dead && revealed(id)
+            && block.timestamp > uint256(r.lastFed) + LIFE;
     }
 
     function attack(uint256 id) external nonReentrant {

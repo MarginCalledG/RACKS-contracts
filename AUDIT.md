@@ -1329,6 +1329,50 @@ Moeglichkeiten, falls es geschlossen werden soll:
 3. Den Anspruch beim Settle in Anteilen statt in Nominalbetraegen fuehren, sodass er mitschmilzt.
    Das ist ein Eingriff in die Settle-/Claim-Buchhaltung und damit ein eigenes Audit wert.
 
+## Runde 46 — tote Agenten blockieren das Wallet-Limit (N-54)
+Von einem Tester gemeldet: *"some of my nfts are dead, and i cannot mint more because wallet limit
+and contract says they are still alive"*. Er hat recht, und die Ursache ist real.
+
+**Der Befund stimmt.** `alive(id)` ist nach `LIFE` = 3 Tagen falsch, aber `ownedLiving` sinkt erst,
+wenn `r.dead` gesetzt wird. Der amortisierte Sweep in `mint()` wartete auf
+`lastFed + LIFE + UNREVEALED_AFTER` = **10 Tage**. Sieben Tage lang tat er also genau das nicht,
+wofuer er gebaut ist.
+Fix: der Puffer haengt jetzt an `tierCached`. Er schuetzte immer nur einen offenen
+Erstattungsanspruch, und den hat nur ein UNENTHUELLTER Agent (`reclaimUnrevealed` verlangt
+`!revealed && !tierCached`). Ist der Tier gecacht, gibt es nichts zu schuetzen.
+`tierCached` statt `revealed()` bewusst: `revealed()` laeuft ueber `_firstLive`, bis zu REVEAL_SCAN
+externe Calls, und die Schleife laeuft dreimal pro Mint. `tierCached` ist ein SLOAD und wird von
+`attack`, `feed` und `advanceScan` gesetzt — jeder Agent, der je gespielt hat, hat ihn. Einer, der
+enthuellt, aber nie angefasst wurde, behaelt den langen Puffer: langsamer, nie falsch, und `reap(id)`
+holt ihn ohnehin sofort.
+
+**NICHT umgesetzt: ein eigenes `release(uint256 id)`.**
+`reap(id)` existiert bereits, ist oeffentlich und verlangt exakt `revealed(id)` und
+`lastFed + LIFE` — also genau die vorgeschlagene Semantik. Der Auftrag misst das selbst
+(*"reap(2) laeuft durch"*). Ein owner-only `release` waere dieselbe Regel ein zweites Mal, mit
+engerem Aufruferkreis; permissionless ist hier die bessere Eigenschaft, weil Aufraeumen niemandem
+etwas einbringt und deshalb jeder es tun koennen soll. Der Tester war nicht blockiert, er kannte den
+Weg nicht — das ist ein Frontend-Problem.
+Stattdessen: `reapable(uint256 id) view` (O(1); eine owner-indizierte Zaehlung braeuchte
+ERC721Enumerable oder einen unbegrenzten Scan, und das Frontend kennt seine Token-Ids ohnehin) und
+eine sprechende Fehlermeldung, `"wallet cap: reap starved agents first"`.
+
+**NICHT umgesetzt: das Verbrennen der NFT.** Zwei belegte Gruende, beide in
+`test/ReapRelease.t.sol`:
+1. *Eine geschuldete Wiederbelebung wuerde zerstoert.* Der Auftrag nimmt an, `cacheTier` betreffe
+   nur Unenthuellte — das stimmt nicht. Die Bedingung ist `epochEnd(firstLive) > lastFed + LIFE`, und
+   die trifft auf ENTHUELLTE Agenten zu, wenn ein langer Ausfall sie erst nach dem Verhungern
+   enthuellt. `testN54_BurningWouldDestroyAnOwedRevival` faehrt genau das: elf Tage Ausfall, der
+   Keeper kehrt zurueck, der Agent lebt wieder. Ein Burn beim Einsammeln haette das unmoeglich
+   gemacht.
+2. *Ein unabgeholter Gewinn wuerde unerreichbar.* `claim()` verlangt `ownerOf(id) == msg.sender`;
+   nach `_burn` revertet `ownerOf`. Ein toter Agent kann sehr wohl noch einen Preis aus einer Epoche
+   halten, in der er lebte.
+Der Zombie in der Wallet ist dagegen kosmetisch und ueber `alive(id)` bzw. `reapable(id)` fuer jedes
+Frontend erkennbar. Wenn der Burn trotzdem gewuenscht ist, muesste er beide Faelle vorher pruefen —
+die Wiederbelebungsbedingung ist billig, die Gewinnpruefung braeuchte einen Scan ueber
+CLAIM_WINDOW-Epochen oder einen neuen Zaehler in der Tally-Schleife. Das ist eine eigene Entscheidung.
+
 ## Nicht gefunden (geprueft)
 - Flash-Loan-Manipulation des TWAP: Spot -75% in einem Block bewegt TWAP 0 bps (Stresstest).
 - Cayman-Inflation: Index-basiert, keine Share-Ratio -> kein First-Depositor-Vektor.

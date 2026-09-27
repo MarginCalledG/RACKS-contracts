@@ -62,7 +62,7 @@ contract AgentTest is Test {
         uint256 before = usdg.balanceOf(reserve);
         for (uint256 i; i < 10; i++) { vm.prank(alice); agent.mint(); }
         assertEq(usdg.balanceOf(reserve) - before, 990 ether);
-        vm.prank(alice); vm.expectRevert(bytes("wallet cap")); agent.mint();
+        vm.prank(alice); vm.expectRevert(bytes("wallet cap: reap starved agents first")); agent.mint();
     }
 
     function testTierRevealedByEpochSeed() public {
