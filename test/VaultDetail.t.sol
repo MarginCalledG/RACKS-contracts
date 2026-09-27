@@ -127,7 +127,7 @@ contract VaultDetail is Test {
         // drain the pot to the agent, leaving only what lockers are owed
         v.setAgent(address(this));
         uint256 pot = v.potBalance();
-        if (pot > 0) v.drawPot(address(0xBEEF), pot);
+        if (pot > 0) v.payAllocation(address(0xBEEF), v.allocate(pot));
         for (uint256 i; i < 30; i++) { vm.warp(block.timestamp + 1 days); _advAll(); v.burnExpired(); }
         assertGe(k.balanceOf(address(v)) + 1e12, v.totalOwed(), "vault still covers what it owes");
         vm.prank(a); v.unlock(0);                        // the locker can still get out

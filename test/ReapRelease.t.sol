@@ -133,4 +133,35 @@ contract ReapRelease is Test {
         // the owner must still be able to reach a prize from when it was alive
         assertEq(ag.ownerOf(id), p, "the token still exists, so ownerOf still answers");
     }
+
+    // N-53: the stale clock starts at SETTLEMENT, not at the epoch that was played. settle() depends
+    // on the keeper, so counting from `e` charged the holder for keeper downtime out of their own
+    // claim window.
+    function testN53_StaleClockStartsAtSettlement() public {
+        (IRSAgent ag, HashChainSeed src, address keeper) = _casino();
+        address p = address(0xAA6); usdg.mint(p, 100_000 ether);
+        vm.startPrank(p); usdg.approve(address(ag), type(uint256).max);
+        uint256 id = ag.mint(); vm.stopPrank();
+
+        uint32 e0 = ag.currentEpoch();
+        _resolve(ag, src, keeper, e0);
+        ag.advanceScan(id);
+        vm.warp(block.timestamp + 1 hours);
+        uint32 e1 = ag.currentEpoch();
+        vm.prank(keeper); src.reveal(e1, _pre());
+        vm.prank(p); ag.attack(id);
+        vm.warp(ag.epochEnd(e1) + 1); vm.roll(block.number + 1);
+        src.captureClose(e1); vm.roll(block.number + 2); src.captureClose(e1);
+
+        // the keeper is down for a long time; nobody settles
+        vm.warp(block.timestamp + 40 * 8 hours);
+        ag.tally(e1, 50); ag.settle(e1);
+        assertEq(ag.settledAtEpoch(e1), ag.currentEpoch(), "the clock is stamped at settlement");
+
+        // 40 epochs of downtime must not count against the holder's window
+        vm.warp(block.timestamp + 89 * 8 hours);
+        vm.expectRevert(bytes("not stale")); ag.sweepStale(e1);
+        vm.warp(block.timestamp + 2 * 8 hours);
+        ag.sweepStale(e1);                                    // only now
+    }
 }

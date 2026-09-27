@@ -96,9 +96,11 @@ contract InterfaceAudit is Test {
     function testI4_AgentCannotOverdraw() public {
         vm.warp(block.timestamp + 12 hours); v.advance(0, 100000);
         uint256 pot = v.potBalance();
+        // N-53: two calls now, and vm.prank applies to the NEXT one only — so prank each.
         vm.prank(address(ag)); vm.expectRevert(bytes("pot"));
-        v.drawPot(address(0xBEEF), pot + 1 ether);
-        vm.prank(address(ag)); v.drawPot(address(0xBEEF), pot);
+        v.allocate(pot + 1 ether);
+        vm.prank(address(ag)); uint256 sc = v.allocate(pot);
+        vm.prank(address(ag)); v.payAllocation(address(0xBEEF), sc);
         assertApproxEqAbs(v.potBalance(), 0, 1e12, "pot emptied exactly");
         assertGe(k.balanceOf(address(v)) + 1e12, v.totalOwed() + v.pendingBurn(), "lockers still covered");
     }

@@ -8,8 +8,12 @@ interface IERC20r { function transferFrom(address f, address t, uint256 a) exter
 interface ICaymanPot {
     function potBalance() external view returns (uint256);
     function potLive() external view returns (uint256);
-    function drawPot(address to, uint256 amount) external;
     function advance(uint8 tier, uint32 maxEpochs) external;
+    // N-53: prizes are booked and paid in SCALED units so they melt while unclaimed
+    function allocate(uint256 amount) external returns (uint256 scaled);
+    function payAllocation(address to, uint256 scaled) external returns (uint256 amount);
+    function valueOf(uint256 scaled) external view returns (uint256);
+    function allocatedScaled() external view returns (uint256);
 }
 /// one seed per epoch (HashChainSeed or any future source with the same shape)
 interface ISeedSource {
@@ -49,20 +53,26 @@ contract IRSAgent is ERC721, ReentrancyGuard {
 
 
     mapping(uint32 => uint256) public totalShares;
-    mapping(uint32 => uint256) public rewardPerShareRay;
     mapping(uint32 => bool) internal _settledMap;
     uint32[] public activeEpochs;      // epochs that ever had an attack (ascending)
     uint256 public activeCursor;       // first not-yet-settled entry in activeEpochs
     /// N3: O(1) — everything below settledThrough counts as settled without touching storage per epoch
     function settled(uint32 e) public view returns (bool) { return e < settledThrough || _settledMap[e]; }
     mapping(uint256 => mapping(uint32 => uint256)) public shares;
-    uint256 public allocatedPot;
+    /// N-53: scaled prize per unit of weight, times RAY
+    mapping(uint32 => uint256) public rewardScaledPerShareRay;
     bool public paused = true;   // casino starts PAUSED until a real randomness source is wired
     uint32 public settledThrough;     // F1: every epoch < settledThrough is settled
     // attacks are only REGISTERED during the epoch; outcomes are derived once the epoch's seed exists
     mapping(uint32 => uint256[]) internal _attackers;   // agent ids that attacked in epoch e
     mapping(uint32 => uint256) public tallyCursor;      // how many attackers of e have been scored
-    mapping(uint32 => uint256) public epochUnclaimed;  // A5: prize still unclaimed per epoch
+    /// N-53: both of these are SCALED now, not nominal. A nominal claim did not melt, which made
+    /// not claiming the best store of value in the protocol (N-52). Converted back to tokens only at
+    /// claim time, through the vault, which is where the index lives.
+    mapping(uint32 => uint256) public epochUnclaimedScaled;   // A5: prize still unclaimed per epoch
+    /// N-53: the stale clock starts when the prize became CLAIMABLE, not when the epoch was played.
+    /// settle() depends on the keeper, so counting from `e` charged the holder for keeper downtime.
+    mapping(uint32 => uint32) public settledAtEpoch;
     uint256 public constant DUST = 1e9;   // 1e-9 RACKS: below any economically claimable prize
     uint32 public constant CLAIM_WINDOW = 90;          // epochs (~30 days) to claim before sweep
 
@@ -404,15 +414,20 @@ contract IRSAgent is ERC721, ReentrancyGuard {
         _settledMap[e] = true;
         if (e + 1 > settledThrough) settledThrough = e + 1;
         while (activeCursor < activeEpochs.length && activeEpochs[activeCursor] <= e) activeCursor++;
+        settledAtEpoch[e] = currentEpoch();                    // N-53: the stale clock starts HERE
         if (totalShares[e] > 0) {
             // The pot is derived from the vault's balance, so there is nothing to "book" before
             // reading it. We only keep the expiry buckets moving (bounded, per tier).
             for (uint8 t; t < 3; t++) vault.advance(t, 32);
-            uint256 pot = vault.potBalance();
-            uint256 prize = pot > allocatedPot ? pot - allocatedPot : 0;
-            rewardPerShareRay[e] = prize * RAY / totalShares[e];
-            allocatedPot += prize;
-            epochUnclaimed[e] = prize;
+            // N-53: potBalance() already excludes what is allocated, so there is nothing to subtract
+            // here any more. allocate() converts to scaled inside the vault and the prize starts
+            // melting at the unlocked rate from this block on.
+            uint256 prize = vault.potBalance();
+            if (prize > 0) {
+                uint256 prizeScaled = vault.allocate(prize);
+                rewardScaledPerShareRay[e] = prizeScaled * RAY / totalShares[e];
+                epochUnclaimedScaled[e] = prizeScaled;
+            }
         }
     }
 
@@ -422,20 +437,24 @@ contract IRSAgent is ERC721, ReentrancyGuard {
         uint256 w = shares[id][e];
         require(w > 0, "nothing");
         shares[id][e] = 0;
-        uint256 payout = w * rewardPerShareRay[e] / RAY;
-        if (payout > epochUnclaimed[e]) payout = epochUnclaimed[e];   // F2: never pay from other epochs / swept epochs
-        require(payout > 0, "empty");
-        if (payout > allocatedPot) payout = allocatedPot;
-        allocatedPot -= payout;
-        epochUnclaimed[e] -= payout;
-        // Pari-mutuel rounding leaves a few wei per epoch. Without clearing it, allocatedPot never
+        // N-53: everything below is in SCALED units until the vault converts at payout, so both
+        // caps compare like with like — mixing the two would have made them bite at the wrong point.
+        uint256 payoutScaled = w * rewardScaledPerShareRay[e] / RAY;
+        if (payoutScaled > epochUnclaimedScaled[e]) payoutScaled = epochUnclaimedScaled[e];  // F2
+        require(payoutScaled > 0, "empty");
+        uint256 allocated = vault.allocatedScaled();
+        if (payoutScaled > allocated) payoutScaled = allocated;
+        epochUnclaimedScaled[e] -= payoutScaled;
+        // Pari-mutuel rounding leaves a few wei per epoch. Without clearing it the allocation never
         // returns to 0 and the vault's migration guard (which requires "owes nothing") would be
-        // blocked forever by dust. The remainder simply stays in the pot, unallocated.
-        if (epochUnclaimed[e] > 0 && epochUnclaimed[e] <= DUST) {
-            allocatedPot -= epochUnclaimed[e];
-            epochUnclaimed[e] = 0;
+        // blocked forever by dust. The threshold is judged on VALUE, not on the scaled number: a
+        // fixed scaled threshold would drift with the index and eventually swallow real prizes.
+        uint256 rest = epochUnclaimedScaled[e];
+        if (rest > 0 && vault.valueOf(rest) <= DUST) {
+            epochUnclaimedScaled[e] = 0;
+            vault.payAllocation(address(0), rest);             // released back into the pot
         }
-        vault.drawPot(msg.sender, payout);
+        uint256 payout = vault.payAllocation(msg.sender, payoutScaled);
         emit Claimed(id, e, payout);
     }
 
@@ -451,17 +470,23 @@ contract IRSAgent is ERC721, ReentrancyGuard {
 
     function pending(uint256 id, uint32 e) external view returns (uint256) {
         if (!settled(e) || shares[id][e] == 0) return 0;
-        return shares[id][e] * rewardPerShareRay[e] / RAY;
+        // N-53: what it is worth TODAY — an unclaimed prize melts, so this figure falls over time
+        uint256 sc = shares[id][e] * rewardScaledPerShareRay[e] / RAY;
+        if (sc > epochUnclaimedScaled[e]) sc = epochUnclaimedScaled[e];
+        return vault.valueOf(sc);
     }
 
     /// A5 fix: after CLAIM_WINDOW epochs, whatever a settled epoch never paid out returns to the pot
     /// (otherwise forgotten claims would lock pot forever). Permissionless.
     function sweepStale(uint32 e) external {
-        require(settled(e) && currentEpoch() > e + CLAIM_WINDOW, "not stale");
-        uint256 left = epochUnclaimed[e];
+        // N-53: counted from settlement, not from the epoch that was played. settle() depends on
+        // the keeper, so the old form charged the holder for keeper downtime out of their own window.
+        require(settled(e), "not settled");
+        require(currentEpoch() > uint256(settledAtEpoch[e]) + CLAIM_WINDOW, "not stale");
+        uint256 left = epochUnclaimedScaled[e];
         if (left == 0) return;
-        epochUnclaimed[e] = 0;
-        allocatedPot = allocatedPot > left ? allocatedPot - left : 0; // released back into potBalance
+        epochUnclaimedScaled[e] = 0;
+        vault.payAllocation(address(0), left);                 // released back into potBalance
     }
 
     /// unpause only once a real VRF is wired; refuses a codeless placeholder outright

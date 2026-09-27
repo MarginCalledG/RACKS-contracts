@@ -1373,6 +1373,65 @@ Frontend erkennbar. Wenn der Burn trotzdem gewuenscht ist, muesste er beide Fael
 die Wiederbelebungsbedingung ist billig, die Gewinnpruefung braeuchte einen Scan ueber
 CLAIM_WINDOW-Epochen oder einen neuen Zaehler in der Tally-Schleife. Das ist eine eigene Entscheidung.
 
+## Runde 47 — nicht abgeholte Gewinne schmelzen (N-53)
+Setzt den eigenen Befund N-52 um. Ein nicht abgeholter Gewinn verlor ueber 29 Tage 0 %, waehrend
+gehaltene Token 87,4 % und der langsamste Lock 18,2 % verloren — Nichtabholen war die beste
+Aufbewahrung im Protokoll, ohne Bindung und ohne Gebuehr.
+
+**Weggabelung: verbrannt, nicht gepottet.** Der Empfehlung des Auftrags gefolgt, und aus demselben
+Grund: `testD5_ExpiredMeltIsBurnedNotPotted` haelt fuer abgelaufene Lock-Positionen bereits fest, dass
+der Melt einer vault-gehaltenen Position mit Faktor 1,0 gebrannt wird. Bei Gewinnen etwas anderes zu
+tun waere eine zweite, widersprechende Antwort auf dieselbe Frage — Muster 1 der Projektliste.
+
+**Umbau.** Die Buchhaltung ist vom Agenten in den Vault gewandert, weil dort der Index lebt:
+- `allocatedScaled` im Vault; `allocatedValue()` und `valueOf(scaled)` als Views.
+- `pendingBurn()` rechnet jetzt `(expiredScaled + allocatedScaled) * (burnIdx - i) / RAY` — beide
+  reiten denselben Index, teilen sich also eine Burn-Uhr.
+- `potBalance()` zieht `allocatedValue()` zusaetzlich ab. Damit entfaellt `allocatedPot` im Agenten
+  vollstaendig: `settle` liest einfach `vault.potBalance()`, es gibt nichts mehr zu subtrahieren.
+- `drawPot` ist ersetzt durch `allocate(amount) -> scaled` und `payAllocation(to, scaled) -> amount`.
+  Beide rufen `burnExpired()` ZUERST, damit eine neu hinzukommende Allokation nie Melt nachzahlt, der
+  vor ihr liegt — dieselbe Reihenfolge, die `advance` fuer `expiredScaled` schon einhaelt.
+  `to == address(0)` ist der Sweep-Pfad: freigeben statt auszahlen.
+- Im Agenten sind `rewardScaledPerShareRay[e]` und `epochUnclaimedScaled[e]` skaliert; umgerechnet
+  wird erst beim Claim, durch den Vault. Keine Rate wird je rekonstruiert (N-49-Klasse vermieden) —
+  der kumulative Index speichert den Pfad.
+
+**Worauf der Auftrag hingewiesen hat, und was daraus wurde:**
+- *Praezision:* `allocate(1)` ergibt eine Allokation > 0 und zahlt nie mehr als 1 wei aus
+  (`testN53_OneWeiPrizeSurvivesTheRoundTrip`). Beide Rundungen sind Floor, also immer zugunsten des
+  Protokolls; pro Allokation bleibt bis zu 1 wei im Pot liegen statt zu verschwinden.
+- *Die Deckelungen in `claim`:* beide vergleichen jetzt skaliert gegen skaliert.
+- *DUST:* wird auf den WERT angewendet (`vault.valueOf(rest) <= DUST`), nicht auf die skalierte Zahl.
+  Eine feste skalierte Schwelle waere mit dem Index gewandert und haette irgendwann echte Gewinne
+  geschluckt.
+- *Migrationsschutz:* `testN53_AllocationReturnsToExactlyZero` faehrt Auszahlung und Sweep ueber zwei
+  verschiedene Indexstaende und prueft `allocatedScaled == 0`.
+- *Invariante:* `invariant_allocatedLeqPot` war nach dem Umbau sinnlos, weil `potBalance()` die
+  Allokation jetzt ausschliesst — beide Seiten bewegen sich. Neu hergeleitet als
+  `invariant_vaultCoversEveryClaim`: `balance >= totalOwed + allocatedValue + pendingBurn`. Das ist
+  die Solvenzaussage, die tatsaechlich gelten muss.
+
+**Latenter Fehler mitgenommen:** die Sweep-Frist lief ab der gespielten Epoche `e`, nicht ab dem
+Moment, in dem der Gewinn abholbar wurde. `settle` haengt am Keeper, also ging Ausfallzeit vom
+Fenster des Gewinners ab. `settledAtEpoch[e]` wird jetzt in `settle` gestempelt; Test
+`testN53_StaleClockStartsAtSettlement` faehrt 40 Epochen Ausfall und prueft, dass sie nicht zaehlen.
+
+**Ergebnis, gemessen:** 29 Tage, gehalten 125.759 — nicht abgeholt 125.759. Auf die Stelle identisch.
+Der Melt wird gebrannt und laesst den Pot unveraendert (`testN53_TheMeltIsBurnedNotPotted`).
+
+**`CLAIM_WINDOW` bleibt 90 Epochen** — die Begruendung des Auftrags ist uebernommen und steht in
+STATUS, damit sie nicht erneut aufkommt.
+
+**Offene Frage beantwortet: Free Float bleibt wie er ist.** Allokierte Gewinne liegen exempt im
+Vault, also weder in `U` noch in `L`. `U` um exempte Token zu erweitern wuerde die Definition
+brechen. Und der Anreiz, auf den die Frage zielte, verschwindet mit N-53 ohnehin: wer nicht abholt,
+verliert jetzt mit derselben Rate wie ein Halter. Als bewusst hingenommen dokumentiert.
+
+Laeufe: 267 Unit-Tests gruen; `AgentInvariant`, `CaymanInvariant` und `RacksInvariant` ueber 45.000
+randomisierte Aufrufe gruen; Fork-Suite gruen. IRSAgent 19.959 B (Reserve 4.617 B) — der engste
+Stand bisher, im Auge behalten.
+
 ## Nicht gefunden (geprueft)
 - Flash-Loan-Manipulation des TWAP: Spot -75% in einem Block bewegt TWAP 0 bps (Stresstest).
 - Cayman-Inflation: Index-basiert, keine Share-Ratio -> kein First-Depositor-Vektor.

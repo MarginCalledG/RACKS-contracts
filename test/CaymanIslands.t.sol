@@ -100,7 +100,7 @@ contract CaymanTest is Test {
         vault.harvest(alice, 0);
         uint256 pot = vault.potBalance();
         assertGt(pot, 0);
-        vault.drawPot(winner, pot / 2);
+        vault.payAllocation(winner, vault.allocate(pot / 2));
         assertApproxEqAbs(k.balanceOf(winner), pot / 2, 1e6);
         assertApproxEqRel(vault.potBalance(), pot / 2, 0.01e18);
     }

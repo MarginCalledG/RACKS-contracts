@@ -318,6 +318,30 @@ Keeper-Gaskosten: 3x advance + burnExpired + meltPool + swapTax pro Tick.
   "der Pot wird jede Epoche geleert" gilt nur fuer Epochen MIT Treffern (R8-6, Doku korrigiert).
 - `sweepStale` vernichtet einen nicht abgeholten Gewinnanspruch nach 90 Epochen; danach revertet
   `claim` mit "empty". So gewollt — den Verlust traegt der Gewinner (R9-4).
+  **Bis N-53 war das nur die halbe Wahrheit.** Der Anspruch wurde nominal gefuehrt und lag in einem
+  melt-exempten Vault, schmolz also **gar nicht**: nicht abzuholen war damit die beste Aufbewahrung
+  im ganzen Protokoll — gemessen ueber 29 Tage 0 % Verlust gegen 18,2 % beim langsamsten Lock und
+  87,4 % beim Halten (N-52). Der Sweep war zugleich eine kostenlose 30-Tage-Option auf Melt-Freiheit.
+  **Seit N-53 wird der Anspruch skaliert gefuehrt** (`allocatedScaled` im Vault, gegen den
+  Unlocked-Index): er schmilzt mit Faktor 1,0 wie ein gehaltener Bestand, und dieser Melt wird
+  **gebrannt**, nicht in den Pot geleitet — dieselbe Antwort, die D5 fuer abgelaufene Locks schon
+  gegeben hat. Gemessen nach dem Fix: 125.759 nicht abgeholt gegen 125.759 gehalten, auf die
+  Stelle identisch.
+  Nebenwirkung, bewusst in Kauf genommen: ein Gewinn ist nach 30 Tagen nur noch rund 12 % wert, der
+  Sweep holt also kaum noch etwas zurueck. Er ist weitgehend zeremoniell — schadet aber niemandem.
+- **`CLAIM_WINDOW` bleibt bei 90 Epochen, entschieden.** Ein kurzes Fenster war nie der Schutz gegen
+  die Option, nur eine Begrenzung ihrer Dauer; N-53 beseitigt die Option selbst, und danach ist
+  Nichtabholen bei jeder Fensterlaenge wirkungsgleich mit Abholen-und-Halten. Dagegen sprach: drei
+  Tage haetten gereicht, dass ein Wochenende einen Gewinn kostet, und der Keeper ist im Testnetz
+  dreimal ausgefallen, einmal ueber 24 Stunden.
+- **Die Frist laeuft ab der Abrechnung, nicht ab dem Spiel** (N-53). `settledAtEpoch[e]` wird in
+  `settle` gestempelt; vorher zaehlte `currentEpoch() > e + CLAIM_WINDOW` ab der gespielten Epoche,
+  und weil `settle` am Keeper haengt, ging Keeper-Ausfallzeit vom Fenster des Gewinners ab.
+- **Offen gelassen: allokierte Gewinne zaehlen in keine der beiden Free-Float-Groessen.** Sie liegen
+  exempt im Vault, also weder in `U` noch in `L`. Nach N-53 ist das folgenlos: wer nicht abholt,
+  haelt zwar die Rate minimal niedriger, verliert seinen Bestand aber mit derselben Rate wie ein
+  Halter, der Anreiz zum Zoegern ist also weg. `U` um exempte Token zu erweitern wuerde die
+  Definition ("umlaufend, nicht-exempt") brechen — bewusst nicht gemacht.
 - SPY `uiMultiplier` (ERC-8056): falls ein Split die On-Chain-Balance rebased, waere der v2-Pool per
   `skim()` abgreifbar. Vor Mainnet mit RH klaeren.
 

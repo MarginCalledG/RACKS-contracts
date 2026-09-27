@@ -65,7 +65,13 @@ contract AgentInvariant is Test {
     AgentHandler h; IRSAgent agent; CaymanIslands vault;
     function setUp() public { h = new AgentHandler(); h.unpause(); agent = h.agent(); vault = h.vault(); targetContract(address(h)); }
     /// never reserve more prize than the pot actually holds
-    function invariant_allocatedLeqPot() public view { assertLe(agent.allocatedPot(), vault.potBalance()); }
+    /// N-53 re-derivation: potBalance() now EXCLUDES what is allocated, so "allocated <= pot" is no
+    /// longer the statement to make — both sides move. What must hold is the solvency of the whole
+    /// book: the vault holds at least everything it owes anyone, plus the melt still to be burned.
+    function invariant_vaultCoversEveryClaim() public view {
+        uint256 bal = h.k().balanceOf(address(vault));
+        assertGe(bal + 1e12, vault.totalOwed() + vault.allocatedValue() + vault.pendingBurn());
+    }
     /// vault stays solvent for its vaults even as agents drain the pot
     function invariant_vaultSolvent() public view {
         uint256 c; for (uint8 b; b < 3; b++) c += vault.claimOf(h.users(0), b);

@@ -39,7 +39,7 @@ contract CaymanHandler is Test {
     function draw(uint256 amt) public {
         uint256 p = vault.potBalance(); if (p == 0) return;
         amt = bound(amt, 1, p);
-        vault.drawPot(address(0xBEEF), amt);
+        vault.payAllocation(address(0xBEEF), vault.allocate(amt));
     }
 }
 

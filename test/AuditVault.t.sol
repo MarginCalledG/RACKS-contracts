@@ -120,7 +120,7 @@ contract AuditVault is Test {
             else if (op == 1) { try v.unlock(b) {} catch {} }
             else if (op == 2) { try v.relock(b) {} catch {} }
             else if (op == 3) { try v.harvest(us[(seed >> 48) % 3], uint8((seed >> 56) % 3)) {} catch {} }
-            else if (op == 4) { vm.stopPrank(); uint256 p = v.pot(); if (p > 0) v.drawPot(address(0x999), p / 3); vm.startPrank(u); }
+            else if (op == 4) { vm.stopPrank(); uint256 p = v.pot(); if (p > 0) v.payAllocation(address(0x999), v.allocate(p / 3)); vm.startPrank(u); }
             else              { k.poke(); }
             vm.stopPrank();
             uint256 claims; for (uint i; i < 3; i++) for (uint8 t; t < 3; t++) claims += v.claimOf(us[i], t);

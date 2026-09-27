@@ -84,8 +84,10 @@ contract Adversarial is Test {
             vm.warp(block.timestamp + 12 hours);
             _adv();
             uint256 p = v.potBalance();
-            if (p > 0) v.drawPot(address(0xDEAD), p);
-            assertEq(v.potBalance(), 0, "pot emptied");
+            if (p > 0) v.payAllocation(address(0xDEAD), v.allocate(p));
+            // N-53: allocate floors nominal->scaled and the payout floors back, so up to a wei of
+            // the pot survives each round. It stays in the pot; nothing is created.
+            assertLe(v.potBalance(), 2, "pot emptied to within rounding");
             _assertSolvent("drained below the lockers");
         }
         // the position still melts at its own rate and is still fully payable
@@ -325,7 +327,7 @@ contract Adversarial is Test {
         vm.warp(block.timestamp + 20 days); _adv();
         // the agent takes everything it is entitled to before anyone exits
         uint256 p = v.potBalance();
-        if (p > 0) v.drawPot(address(0xDEAD), p);
+        if (p > 0) v.payAllocation(address(0xDEAD), v.allocate(p));
 
         for (uint256 n; n < 6; n++) {
             uint256 i = uint256(keccak256(abi.encode(seed, n))) % 6;

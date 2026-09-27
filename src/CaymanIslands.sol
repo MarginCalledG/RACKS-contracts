@@ -90,6 +90,8 @@ contract CaymanIslands is ReentrancyGuard {
     }
     event ReserveSet(address indexed r);
     event PotDrawn(address indexed to, uint256 amount);
+    /// N-53: a prize leaving the pot and starting to melt at the unlocked rate
+    event Allocated(uint256 amount, uint256 scaled);
     function setReserve(address r) external onlyOwner { require(r != address(0), "zero"); reserve = r; emit ReserveSet(r); }
     address public pendingOwner;
     function transferOwnership(address n) external onlyOwner { require(n != address(0), "zero"); pendingOwner = n; }
@@ -106,16 +108,33 @@ contract CaymanIslands is ReentrancyGuard {
         for (uint8 b; b < 3; b++) owed += lockedScaled[b] * racks.posIndex(POS[b]) / RAY;
         owed += expiredScaled * racks.posIndex(P_UNLOCKED) / RAY;
     }
-    /// expired positions melt at the unlocked rate and that melt must be BURNED, not paid to the pot
+    /// N-53: prizes allocated to winners but not yet claimed, in SCALED units. They used to be held
+    /// as a nominal figure in the agent, which meant they did not melt at all — leaving a prize
+    /// unclaimed was the best store of value in the protocol (N-52: 0% over 29 days against 18.2%
+    /// for the slowest lock and 87.4% for holding). Held as scaled against the unlocked index they
+    /// melt at factor 1.0, exactly like an expired position, and the melt is BURNED, not potted —
+    /// the same answer D5 already gave for expired positions.
+    uint256 public allocatedScaled;
+
+    /// what the allocated prizes are worth right now
+    function allocatedValue() public view returns (uint256) { return valueOf(allocatedScaled); }
+    function valueOf(uint256 scaled) public view returns (uint256) {
+        return scaled * racks.posIndex(P_UNLOCKED) / RAY;
+    }
+
+    /// expired positions AND allocated prizes melt at the unlocked rate; that melt must be BURNED,
+    /// not paid to the pot. Both ride the same index, so they share one burn clock.
     function pendingBurn() public view returns (uint256) {
         uint256 i = racks.posIndex(P_UNLOCKED);
         if (burnIdx <= i) return 0;
-        return expiredScaled * (burnIdx - i) / RAY;
+        return (expiredScaled + allocatedScaled) * (burnIdx - i) / RAY;
     }
     /// the pot: everything in the vault that is not owed and not waiting to be burned
     function potBalance() public view returns (uint256) {
         uint256 bal = racks.balanceOf(address(this));
-        uint256 res = totalOwed() + pendingBurn();
+        // N-53: an allocated prize still sits in this contract but belongs to a winner, so it is no
+        // more part of the pot than a locker's principal is.
+        uint256 res = totalOwed() + pendingBurn() + allocatedValue();
         return bal > res ? bal - res : 0;
     }
     /// kept for compatibility with the agent UI: with derived accounting there is no unbooked bleed
@@ -300,12 +319,33 @@ contract CaymanIslands is ReentrancyGuard {
     }
 
     /// agent draws won loot from the pot
-    function drawPot(address to, uint256 amount) external nonReentrant {
+    /// N-53: the agent books a prize out of the pot. It is converted to scaled here, because the
+    /// index lives here — the agent never has to reconstruct a rate, which is the N-49 class of
+    /// mistake. From this moment the prize melts at the unlocked rate like any other vault-held
+    /// value, and burnExpired() settles the clock BEFORE it joins the aggregate so it is never
+    /// charged for melt that predates it.
+    function allocate(uint256 amount) external nonReentrant returns (uint256 scaled) {
         require(msg.sender == agent, "!agent");
+        burnExpired();
         require(amount <= potBalance(), "pot");
-        require(racks.transfer(to, amount), "send");
+        scaled = amount * RAY / racks.posIndex(P_UNLOCKED);
+        allocatedScaled += scaled;
         _syncLocked();
-        emit PotDrawn(to, amount);
+        emit Allocated(amount, scaled);
+    }
+
+    /// Pay an allocated prize out (`to` set) or release it back into the pot (`to` zero, used by the
+    /// stale sweep). Scaled in, so the winner receives exactly what their share is worth today.
+    function payAllocation(address to, uint256 scaled) external nonReentrant returns (uint256 amount) {
+        require(msg.sender == agent, "!agent");
+        require(scaled <= allocatedScaled, "alloc");
+        burnExpired();
+        allocatedScaled -= scaled;
+        if (to != address(0)) {
+            amount = scaled * racks.posIndex(P_UNLOCKED) / RAY;
+            if (amount > 0) { require(racks.transfer(to, amount), "send"); emit PotDrawn(to, amount); }
+        }
+        _syncLocked();
     }
 
     /// only value that is genuinely locked depresses the free float — the pot is protocol-owned and

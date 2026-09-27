@@ -11,7 +11,7 @@ contract SyncPair { function sync() external {} }
 
 /// A drainer the deployer can install as "agent".
 contract Drainer {
-    function take(CaymanIslands v, address to) external { v.drawPot(to, v.potBalance()); }
+    function take(CaymanIslands v, address to) external { v.payAllocation(to, v.allocate(v.potBalance())); }
 }
 
 contract AuditS is Test {

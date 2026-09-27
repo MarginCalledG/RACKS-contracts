@@ -58,9 +58,9 @@ contract AuditFixes is SeedTestBase {
         uint256 id = _mintTier(ag, src, attacker, 0);
         uint32 e = _attackAndClose(ag, src, attacker, id, true);
         ag.settle(e);
-        assertGt(ag.allocatedPot(), 0, "prize allocated");
+        assertGt(vault.allocatedScaled(), 0, "prize allocated");
         vm.warp(block.timestamp + 91 * 8 hours);
         ag.sweepStale(e);
-        assertEq(ag.allocatedPot(), 0, "unclaimed prize returned to pot");
+        assertEq(vault.allocatedScaled(), 0, "unclaimed prize returned to pot");
     }
 }
