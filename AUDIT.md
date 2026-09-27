@@ -1432,6 +1432,43 @@ Laeufe: 267 Unit-Tests gruen; `AgentInvariant`, `CaymanInvariant` und `RacksInva
 randomisierte Aufrufe gruen; Fork-Suite gruen. IRSAgent 19.959 B (Reserve 4.617 B) — der engste
 Stand bisher, im Auge behalten.
 
+## Runde 48 — die Free-Float-Asymmetrie, nachgemessen
+Rueckmeldung zur Runde 47: die Asymmetrie sei nicht adressiert. Sachlich richtig — der Code ist
+unveraendert, ich hatte sie als bewusst hingenommen dokumentiert. Nachgemessen, ob die Begruendung
+traegt, und sie traegt anders als zuvor geschrieben.
+
+**Meine Begruendung in Runde 47 war zu schwach.** Ich hatte argumentiert, der Anreiz verschwinde mit
+N-53, weil Nichtabholen jetzt mit derselben Rate zerfaellt wie Halten. Das stimmt fuer den Faktor
+(beide 1,0), aber nicht fuer `r_w` selbst: wer abholt, erhoeht `U`, damit den Free Float und damit die
+Basisrate — auch fuer sich selbst. Der Anreiz zum Zoegern ist also zweiter Ordnung, aber real.
+
+**Der eigentliche Punkt ist ein anderer: die Eigenschaft ist nicht gewinn-spezifisch.**
+`_syncLocked()` summiert ausschliesslich `lockedScaled[b]`. `expiredScaled` faellt also aus `L`
+heraus, und weil der Vault melt-exempt ist, faellt es auch aus `U` heraus. **Eine abgelaufene, nicht
+abgeholte Lock-Position liegt damit in exakt derselben Lage wie ein nicht abgeholter Gewinn** —
+besessen, jederzeit abholbar, in keiner der beiden Groessen. Das ist viele Runden aelter als N-53.
+
+Gemessen (`test/FreeFloatVaultHeld.t.sol`), dieselbe Menge, sonst identische Welten, instantaner
+Free Float als RAY:
+
+| Ablage | Free Float |
+|---|---:|
+| a) abgeholt und gehalten (in `U`) | 0,5098 |
+| b) abgelaufener Lock im Vault | 0,4678 |
+| c) nicht abgeholter Gewinn | 0,4643 |
+
+b und c liegen innerhalb von 2 % beieinander, beide deutlich unter a. Allokationen in `U`
+mitzuzaehlen, waehrend abgelaufene Positionen draussen bleiben, wuerde die Inkonsistenz also
+**erzeugen** statt sie zu beseitigen.
+
+**Unveraendert, jetzt mit belastbarer Begruendung.** Wer die Asymmetrie schliessen will, braucht eine
+Regel fuer den ganzen Vault — alles, was der Vault fuer jemanden haelt (`expiredScaled` +
+`allocatedScaled`), zaehlt in `U` —, nicht einen Patch fuer Gewinne. Das ist machbar, aber es
+verschiebt die Melt-Rate fuer alle, beruehrt `setLockedSupply` und die Rate-Bandbreite, und
+widerspricht der Definition von `U` als "umlaufend, nicht-exempt". Das ist eine Owner-Entscheidung,
+keine Fehlerbehebung. Der Test haelt den Ist-Zustand fest, damit eine kuenftige Aenderung an einer
+der drei Ablagen sofort gegen die anderen beiden sichtbar wird.
+
 ## Nicht gefunden (geprueft)
 - Flash-Loan-Manipulation des TWAP: Spot -75% in einem Block bewegt TWAP 0 bps (Stresstest).
 - Cayman-Inflation: Index-basiert, keine Share-Ratio -> kein First-Depositor-Vektor.

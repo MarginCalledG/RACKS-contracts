@@ -337,11 +337,18 @@ Keeper-Gaskosten: 3x advance + burnExpired + meltPool + swapTax pro Tick.
 - **Die Frist laeuft ab der Abrechnung, nicht ab dem Spiel** (N-53). `settledAtEpoch[e]` wird in
   `settle` gestempelt; vorher zaehlte `currentEpoch() > e + CLAIM_WINDOW` ab der gespielten Epoche,
   und weil `settle` am Keeper haengt, ging Keeper-Ausfallzeit vom Fenster des Gewinners ab.
-- **Offen gelassen: allokierte Gewinne zaehlen in keine der beiden Free-Float-Groessen.** Sie liegen
-  exempt im Vault, also weder in `U` noch in `L`. Nach N-53 ist das folgenlos: wer nicht abholt,
-  haelt zwar die Rate minimal niedriger, verliert seinen Bestand aber mit derselben Rate wie ein
-  Halter, der Anreiz zum Zoegern ist also weg. `U` um exempte Token zu erweitern wuerde die
-  Definition ("umlaufend, nicht-exempt") brechen — bewusst nicht gemacht.
+- **Bewusst so: alles, was der Vault fuer jemanden haelt, zaehlt in keine der beiden
+  Free-Float-Groessen.** `_syncLocked()` summiert nur `lockedScaled[b]`, also fallen sowohl
+  `expiredScaled` als auch `allocatedScaled` aus `L`; und weil der Vault melt-exempt ist, fallen sie
+  auch aus `U`. Wer nicht abholt, haelt die Rate damit minimal niedriger — fuer alle, sich selbst
+  eingeschlossen. Gemessen (instantaner Free Float, gleiche Menge, sonst identische Welten):
+  abgeholt und gehalten 0,5098 · abgelaufener Lock im Vault 0,4678 · nicht abgeholter Gewinn 0,4643.
+  **Das ist keine Eigenschaft von Gewinnen, sondern des Vaults**: eine abgelaufene, nicht abgeholte
+  Lock-Position liegt in exakt derselben Lage, viele Runden aelter als N-53. Allokationen in `U`
+  mitzuzaehlen und abgelaufene Positionen nicht, wuerde die Inkonsistenz erzeugen statt sie zu
+  beseitigen. Wer sie schliessen will, braucht eine Regel fuer den ganzen Vault; das verschiebt die
+  Melt-Rate fuer alle und widerspricht der Definition von `U` als "umlaufend, nicht-exempt".
+  Test: `test/FreeFloatVaultHeld.t.sol`.
 - SPY `uiMultiplier` (ERC-8056): falls ein Split die On-Chain-Balance rebased, waere der v2-Pool per
   `skim()` abgreifbar. Vor Mainnet mit RH klaeren.
 
