@@ -175,7 +175,17 @@ Enthuellen ist NUR bis zum Epochenende erlaubt (C6) — der Keeper sieht den Pos
 Verbleibende Keeper-Macht: innerhalb der Epoche spaet enthuellen oder gar nicht. Preis:
 1. Keine Enthuellung bis Epochenende = Epoche FAILED, jeder verliert, auch der Keeper.
 2. `requiredBond()` = max(slashPerMiss, Pot) ist die SOLL-Kaution; `attack()` verweigert, solange die
-   Kaution darunter liegt (bondOk). Ein einzelner Slash ist auf max(Kaution/SLASH_DIVISOR,
+   Kaution darunter liegt (bondOk). **Das sperrt das Casino fuer ALLE, nicht einzelne Spieler** —
+   `attack` revertet protokollweit mit `"keeper underbonded"`, leise und ohne Warnung. `requiredBond()`
+   waechst mit dem Pot, also ist das kein Grenzfall, sondern der Normalverlauf eines erfolgreichen
+   Launches. Monitoring braucht deshalb einen **Vorlauf-Alarm**: warnen, wenn die Kaution unter das
+   Anderthalbfache des Pots faellt, nicht erst beim Unterschreiten.
+   Ebenfalls ins Monitoring, gleichrangig: **`refundsReady()`** und das **USDG-Guthaben der Reserve**.
+   `reclaimUnrevealed` zahlt aus der Reserve, nicht aus dem Contract; faellt die Freigabe weg ODER
+   geht das Guthaben zur Neige, revertet jede Erstattung, und niemand merkt es, bis sich jemand
+   beschwert. Dass die Erstattung an einer Multisig-kontrollierten Adresse haengt, gehoert in den
+   Launch-Text, nicht nur ins Runbook.
+   Ein einzelner Slash ist auf max(Kaution/SLASH_DIVISOR,
    slashPerMiss) gedeckelt, damit ein Keeper-Ausfall sie nicht potenziert — jeder Slash landet im Pot
    und wuerde sonst den naechsten erhoehen (R7-1). **Das Viertel ist ein Deckel UEBER dem Floor, keine
    Zusage:** sobald Kaution/4 unter `slashPerMiss` faellt, gewinnt der Floor und ein einzelner Miss

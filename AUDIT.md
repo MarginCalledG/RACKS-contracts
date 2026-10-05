@@ -1469,6 +1469,40 @@ widerspricht der Definition von `U` als "umlaufend, nicht-exempt". Das ist eine 
 keine Fehlerbehebung. Der Test haelt den Ist-Zustand fest, damit eine kuenftige Aenderung an einer
 der drei Ablagen sofort gegen die anderen beiden sichtbar wird.
 
+## Runde 49 — Lebendigkeitsbericht, nachgeprueft
+Externer Bericht zu den Ausstiegspfaden, geschrieben gegen `3431a03`. Die Fragestellung ist richtig
+und bisher nicht abgedeckt gewesen: die Suite prueft **Solvenz** (kann das System zahlen?), nicht
+**Lebendigkeit** (kommt der einzelne Nutzer daran?). Inhaltlich halten die Befunde.
+
+**Selbst nachgemessen** (`test/VerifyLiveness.t.sol`): ein Locker kommt nach **365 Tagen** voelliger
+Keeper-Stille raus, ohne dass jemals jemand `advance()` gerufen haette — Stufe 1d/3d/14d mit
+641k/403k/403k Gas, weit unter jedem Blocklimit. Der Bericht nennt 602k/387k/387k; dieselbe
+Groessenordnung, Unterschied aus Lock-Groesse und Timing. Auch 400 Tage Rueckstand und ein absichtlich
+unvollstaendiger `advance(0, 7)` bei 30 fremden Positionen blockieren den eigenen Ausstieg nicht.
+
+**Im Code gegengeprueft und bestaetigt:**
+- Der einzige Schwebezustand ist `"no seed yet"` — eine Epoche mit Reveal, deren Close-Hash nie
+  eingefroren wurde. Sie ist weder `failed` noch `resolved`. Aufloesbar von jedem, und zwar noch
+  einfacher als der Bericht schreibt: `tally()` ruft `seedSource.captureClose(e)` selbst auf
+  (*"harmless if already captured"*), ein separater Aufruf ist also nicht noetig.
+- `refundsReady()` prueft Freigabe UND Guthaben der Reserve. Faellt eines weg, revertet jede
+  Erstattung. Vertrauensannahme, kein Codefehler — jetzt in STATUS beim Monitoring.
+- `attack` revertet protokollweit bei `!bondOk()`. Das sperrt das Casino fuer alle, leise.
+  Vorlauf-Alarm bei 1,5x Pot in STATUS aufgenommen.
+
+**Was am Bericht nicht stimmt:**
+1. *"Gesamtsuite 282 Tests"* — die drei genannten Dateien (`ExitLiveness`, `ClaimLiveness`,
+   `N53Adversarial`) sind **nicht auf main**. Der Stand ist 268. Die Tests existieren nur lokal beim
+   Autor; als Regressionstests nuetzen sie erst etwas, wenn sie gepusht sind.
+2. *"`invariant_allocatedLeqPot`"* wird als Teil der vorhandenen Suite zitiert. Die Invariante wurde
+   in Runde 47 (N-53, Commit `f0b3380`) entfernt und durch `invariant_vaultCoversEveryClaim` ersetzt,
+   weil `potBalance()` die Allokation seitdem ausschliesst und beide Seiten sich bewegen. `f0b3380`
+   ist ein Vorfahr von `3431a03` — der Satz kann gegen den genannten Commit nicht stimmen.
+
+Der Rest des Berichts — gescheiterte Epoche blockiert spaetere nicht, Verkauf ueberlebt ein
+revertendes Orakel, Pari-mutuel zahlt auf die Einheit genau — deckt sich mit dem, was die
+bestehenden Suiten bereits halten.
+
 ## Nicht gefunden (geprueft)
 - Flash-Loan-Manipulation des TWAP: Spot -75% in einem Block bewegt TWAP 0 bps (Stresstest).
 - Cayman-Inflation: Index-basiert, keine Share-Ratio -> kein First-Depositor-Vektor.
