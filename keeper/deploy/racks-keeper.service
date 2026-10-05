@@ -1,0 +1,42 @@
+[Unit]
+Description=RACKS Keeper
+Documentation=https://github.com/MarginCalledG/RACKS-contracts/blob/main/keeper/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=keeper
+WorkingDirectory=/opt/racks-keeper
+EnvironmentFile=/opt/racks-keeper/.env
+ExecStart=/usr/bin/node keeper/keeper.mjs
+Restart=always
+RestartSec=10
+
+# Exit code 2 means "chain out of sync": the committed chain and the local chain.json disagree.
+# That state needs a human, not a retry. Without this line Restart=always would relaunch every
+# 10 s forever and the unit would look alive to `systemctl is-active` while doing nothing. With it
+# the unit lands in `failed`, which is the state external monitoring can actually see.
+# This does NOT replace alerting on the exit code; it makes the alert meaningful.
+RestartPreventExitStatus=2
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=racks-keeper
+
+# Hardening. The bot needs network access, its own directory, and nothing else.
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+ReadWritePaths=/opt/racks-keeper
+
+[Install]
+WantedBy=multi-user.target

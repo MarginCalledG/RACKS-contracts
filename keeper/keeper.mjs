@@ -17,17 +17,19 @@ const wallet = new ethers.Wallet(KEY, provider);
 
 const seedAbi  = ["function reveal(uint32 e, bytes32 preimage)", "function resolved(uint32 e) view returns (bool)",
                   "function preimage(uint32 e) view returns (bytes32)", "function captureClose(uint32 e)",
-                  "function remaining() view returns (uint256)", "function head() view returns (bytes32)", "function bondOk() view returns (bool)"];
+                  "function remaining() view returns (uint256)", "function head() view returns (bytes32)", "function bondOk() view returns (bool)",
+                  "function bond() view returns (uint256)"];
 const agentAbi = ["function advanceScan(uint256 id)", "function currentEpoch() view returns (uint32)", "function epochEnd(uint32 e) view returns (uint256)",
                   "function settled(uint32 e) view returns (bool)", "function settledThrough() view returns (uint32)",
                   "function tallied(uint32 e) view returns (bool)", "function tally(uint32 e, uint256 count)",
-                  "function settle(uint32 e)"];
+                  "function settle(uint32 e)", "function refundsReady() view returns (bool)"];
 const racksAbi = ["function meltPool()", "function swapTax()", "function balanceOf(address) view returns (uint256)",
                   "function swapThreshold() view returns (uint256)", "function autoSwap() view returns (bool)",
                   "function pairLastMelt() view returns (uint64)", "function pair() view returns (address)"];
 const vaultAbi = ["function advance(uint8 tier, uint32 maxEpochs)", "function burnExpired()",
                   "function rolledThrough(uint256) view returns (uint32)", "function pendingBurn() view returns (uint256)",
-                  "function BUCKET() view returns (uint256)", "function expiringAt(uint8,uint32) view returns (uint256)"];
+                  "function BUCKET() view returns (uint256)", "function expiringAt(uint8,uint32) view returns (uint256)",
+                  "function potBalance() view returns (uint256)"];
 
 const seed  = new ethers.Contract(SEED,  seedAbi,  wallet);
 const agent = new ethers.Contract(AGENT, agentAbi, wallet);
@@ -66,7 +68,22 @@ async function tick() {
   const now = Math.floor(Date.now() / 1000);
   const cur = Number(await agent.currentEpoch());
   const from = Number(await agent.settledThrough());
-  if (!(await seed.bondOk())) console.error("WARNING: bond below cover — attacks are refused until topped up");
+  // N-55: warning at the crossing is too late. requiredBond() is max(pot, slashPerMiss) and the pot
+  // grows with every epoch, so a successful launch walks into this by itself — and when it does,
+  // attack() reverts PROTOCOL-WIDE and silently. Warn with a run-up instead.
+  if (!(await seed.bondOk())) {
+    console.error("ALERT: bond below cover — attacks are refused protocol-wide until topped up");
+  } else if (vault) {
+    const [bond, pot] = await Promise.all([seed.bond(), vault.potBalance()]);
+    if (pot > 0n && bond * 2n < pot * 3n) {         // bond < 1.5x pot
+      console.error(`WARNING: bond ${bond} is under 1.5x the pot ${pot} — top up before it blocks every attack`);
+    }
+  }
+  // Refunds are paid from the RESERVE, not from the contract. If its allowance is pulled or its
+  // USDG runs out, every reclaimUnrevealed reverts and nobody notices until someone complains.
+  if (!(await agent.refundsReady())) {
+    console.error("ALERT: refundsReady() is false — mint refunds are reverting (reserve allowance or balance)");
+  }
   // 1) reveal-then-play: the CURRENT epoch's value goes public at its start
   if ((await seed.preimage(cur)) === ethers.ZeroHash) {
     const pre = chain.chain[state.nextIdx];

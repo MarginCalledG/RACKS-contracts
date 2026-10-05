@@ -1503,6 +1503,40 @@ Der Rest des Berichts — gescheiterte Epoche blockiert spaetere nicht, Verkauf 
 revertendes Orakel, Pari-mutuel zahlt auf die Einheit genau — deckt sich mit dem, was die
 bestehenden Suiten bereits halten.
 
+## Runde 50 — Keeper als Dienst (N-55)
+Betriebsauftrag, gegen `9b0734d` geschrieben — der Stand stimmt, und alle zitierten Stellen wurden
+gegen den Code geprueft: die drei Alarm-Strings sind woertlich korrekt, `process.exit(2)` bei
+`chain out of sync` existiert, und alle elf Umgebungsvariablen werden tatsaechlich gelesen. Keine
+Contract-Aenderung.
+
+**N-55 — der Bot warnte erst beim Unterschreiten, nicht davor.** `requiredBond()` ist
+`max(pot, slashPerMiss)` und der Pot waechst mit jeder Epoche, ein erfolgreicher Launch laeuft also
+von allein in die Grenze. Beim Unterschreiten revertet `attack` protokollweit und leise — fuer alle,
+nicht fuer einzelne. Der Bot warnt jetzt mit Vorlauf bei Kaution < 1,5 x Pot und meldet das
+Unterschreiten als ALERT statt als WARNING.
+Dazu neu: eine Pruefung auf `agents.refundsReady()`. Erstattungen kommen aus der Reserve, nicht aus
+dem Contract; faellt deren Freigabe weg oder geht das USDG aus, revertet jede Erstattung, und es
+faellt niemandem auf, bis sich jemand beschwert.
+
+**Ausgeliefert** unter `keeper/deploy/`: eine gehaertete systemd-Unit, eine `env.example` mit der
+Begruendung hinter jedem Standardwert, und ein `watchdog.sh` fuer cron, der von aussen prueft —
+Unit-Status, Exit-Code 2, die Warnungen aus journald, und ob `remaining()` sich ueberhaupt noch
+bewegt. Der letzte Punkt ist der einzige, der feststellt, ob der Bot seine Arbeit macht statt nur zu
+laufen.
+
+**Abweichung vom Auftrag, begruendet:** der Auftrag stellt `RestartPreventExitStatus=2` und die
+Auswertung des Exit-Codes im Monitoring als Alternativen dar und empfiehlt letzteres. Die Unit macht
+**beides**. Ohne `RestartPreventExitStatus=2` startet systemd den Bot bei `chain out of sync` alle
+zehn Sekunden neu, und `systemctl is-active` flattert dabei zwischen `activating` und `active` —
+die Unit sieht lebendig aus, waehrend nichts passiert. Mit der Zeile landet sie in `failed`, und das
+ist ein Zustand, den ein Waechter eindeutig sehen kann. Die Auswertung des Exit-Codes ersetzt das
+nicht, sie wird dadurch erst aussagekraeftig; `watchdog.sh` prueft ihn explizit und sagt dazu, dass
+blindes Neustarten hier der falsche Reflex ist.
+
+Der Rest des Auftrags — Rollentrennung der Wallets, dedizierter RPC, `chain.json` als
+Verfuegbarkeits- statt Geheimnis-Asset, die sechs Abnahmepunkte — ist unveraendert in
+`keeper/README.md` uebernommen.
+
 ## Nicht gefunden (geprueft)
 - Flash-Loan-Manipulation des TWAP: Spot -75% in einem Block bewegt TWAP 0 bps (Stresstest).
 - Cayman-Inflation: Index-basiert, keine Share-Ratio -> kein First-Depositor-Vektor.
